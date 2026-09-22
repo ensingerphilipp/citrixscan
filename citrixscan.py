@@ -6,10 +6,11 @@
 ║  Comprehensive external security assessment for Citrix NetScaler ADC         ║
 ║  and NetScaler Gateway appliances.                                           ║
 ║                                                                              ║
-║  Author  : NetGuard 24/7 LLC (netguard24-7.com) & Open Source Contributors   ║
+║  Authors  : Philipp Ensinger & NetGuard 24/7 LLC (netguard24-7.com)          ║
+                                                  & Open Source Contributors   ║
 ║  License : MIT                                                               ║
-║  Version : 1.0.1                                                             ║
-║  Date    : 2026-03-30                                                        ║
+║  Version : 1.2                                                               ║
+║  Date    : 2026-09-22                                                        ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 CAPABILITIES:
@@ -1929,7 +1930,7 @@ def build_recommendations(result: ScanResult) -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def scan_target(target: str, port: int = 443, timeout: int = 15,
-                modules: str = "all", deep_scan: bool = True) -> ScanResult:
+                modules: str = "headers", deep_scan: bool = False) -> ScanResult:
     """Full-scope security scan of a single target."""
     start_time = datetime.now(timezone.utc)
     result = ScanResult(
@@ -2365,7 +2366,7 @@ def main():
     parser.add_argument("--csv", dest="output_csv", help="CSV report output path")
     parser.add_argument("--markdown", dest="output_md", help="Markdown report output path")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    parser.add_argument("--modules", default="all",
+    parser.add_argument("--modules", default="headers",
                         help="Scan modules: all, cve, ioc, misconfig, tls, headers (comma-separated)")
     parser.add_argument("--no-deep", action="store_true", help="Skip EPA binary download")
     parser.add_argument("--list-cves", action="store_true", help="List all CVEs in database and exit")
