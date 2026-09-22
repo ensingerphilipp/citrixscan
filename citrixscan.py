@@ -7,7 +7,7 @@
 ║  and NetScaler Gateway appliances.                                           ║
 ║                                                                              ║
 ║  Authors  : Philipp Ensinger & NetGuard 24/7 LLC (netguard24-7.com)          ║
-                                                  & Open Source Contributors   ║
+║                                                  & Open Source Contributors  ║
 ║  License : MIT                                                               ║
 ║  Version : 1.2                                                               ║
 ║  Date    : 2026-09-22                                                        ║
@@ -41,8 +41,8 @@ DISCLAIMER:
   no liability for misuse.
 """
 
-__version__ = "1.0.1"
-__author__ = "NetGuard 24/7 LLC & Open Source Contributors"
+__version__ = "1.2.0"
+__author__ = "Philipp Ensinger & NetGuard 24/7 LLC & Open Source Contributors"
 __license__ = "MIT"
 
 import argparse
@@ -620,7 +620,7 @@ def http_get(host, port, path, ctx, timeout=15, method="GET", max_body=8192):
 def http_get_binary(host, port, path, ctx, timeout=30, max_bytes=20*1024*1024):
     url = f"https://{host}:{port}{path}"
     req = urllib.request.Request(url, headers={
-        "User-Agent": "CitrixScan/1.0 (Security Assessment)",
+        "User-Agent": "CitrixScan/1.2 (Security Assessment)",
         "Accept": "application/octet-stream,*/*", "Connection": "close",
     })
     try:
@@ -1128,7 +1128,7 @@ def _release_api_get(path: str, params: Optional[dict] = None, timeout: int = 10
         url = f"{url}?{query}"
     request = urllib.request.Request(url, headers={
         "Origin": "https://docs.netscaler.com",
-        "User-Agent": "citrixscan/1.0",
+        "User-Agent": "Citrixscan/1.2",
         "Accept": "application/json",
     })
     with urllib.request.urlopen(request, timeout=max(3, min(timeout, 20))) as response:
