@@ -594,7 +594,7 @@ def audit_tls(tls_info: dict) -> List[dict]:
 def http_get(host, port, path, ctx, timeout=15, method="GET", max_body=8192):
     url = f"https://{host}:{port}{path}"
     req = urllib.request.Request(url, method=method, headers={
-        "User-Agent": "CitrixScan/1.0 (Security Assessment)",
+        "User-Agent": "CitrixScan/1.2 (Security Assessment)",
         "Accept": "text/html,application/json,application/xml;q=0.9,*/*;q=0.8",
         "Connection": "close",
     })

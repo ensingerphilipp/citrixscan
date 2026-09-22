@@ -5,13 +5,15 @@
 
 ## What It Does
 
-CitrixScan performs a comprehensive, non-exploitative security assessment of internet-facing Citrix NetScaler appliances. It identifies the firmware version, maps it against 25 known CVEs spanning 2019–2026, detects vulnerable configurations, checks for indicators of compromise, and audits TLS and security headers — all without authentication.
+CitrixScan performs a non-exploitative security assessment of internet-facing Citrix NetScaler appliances. It identifies the firmware version, can map it against 25 known CVEs spanning 2019–2026, detects vulnerable configurations, checks for indicators of compromise, and audits TLS and security headers — all without authentication.
+
+The default invocation runs version/product fingerprinting and the security-header module. More intrusive or expensive assessment modules such as CVE evaluation, IoC probing, misconfiguration probing, and TLS auditing must be selected explicitly with `--modules` or enabled together with `--modules all`. Core fingerprinting always runs independently of the selected assessment modules.
 
 ### Scan Modules
 
 | Module | What It Checks |
 |---|---|
-| **Version Fingerprinting** | 10 detection vectors including GZIP timestamp extraction (Fox-IT technique), NITRO API probing, EPA binary PE analysis, HTTP header parsing, and static resource hashing |
+| **Version Fingerprinting** | 10 detection vectors including GZIP timestamp extraction (Fox-IT technique), dynamic release lookup for unknown timestamps, NITRO API probing, EPA binary PE analysis, HTTP header parsing, and static resource hashing |
 | **CVE Assessment** | 25 CVEs with version-to-fix mapping, configuration prerequisite validation, in-the-wild exploitation tracking, and public PoC status |
 | **IoC Detection** | 15 known webshell/backdoor paths from CVE-2023-3519 campaigns, CISA AA23-201A indicators, with content-based analysis that distinguishes stock NetScaler files from actual implants |
 | **Misconfiguration Audit** | 12 paths checked for exposed management interfaces, unauthenticated NITRO API access, configuration file exposure, and diagnostic data leaks — with login-page false positive filtering |
@@ -24,14 +26,17 @@ CitrixScan performs a comprehensive, non-exploitative security assessment of int
 ## Quick Start
 
 ```bash
-# Scan a single target
+# Default scan: version/product fingerprinting and security headers
 python3 citrixscan.py 10.0.0.1
 
-# Multiple targets with full reporting
-python3 citrixscan.py 10.0.0.1 10.0.0.2 10.0.0.3 \
-  -v -o report.json --csv report.csv --markdown report.md
+# Full security assessment
+python3 citrixscan.py 10.0.0.1 --modules all
 
-# Bulk scan from file
+# Multiple targets with all assessment modules and full reporting
+python3 citrixscan.py 10.0.0.1 10.0.0.2 10.0.0.3 \
+  --modules all -v -o report.json --csv report.csv --markdown report.md
+
+# Bulk default scan from file
 python3 citrixscan.py -f targets.txt --threads 10 -o results.json
 
 # List all CVEs in the database
@@ -46,6 +51,7 @@ python3 citrixscan.py 10.0.0.1 --no-deep -v
 - **Python 3.8+**
 - **No external dependencies** — stdlib only
 - Network access to target(s) on HTTPS port
+- For unknown GZIP timestamps: outbound HTTPS access to the official NetScaler release-data service, or an existing local release cache
 
 ---
 
@@ -57,11 +63,63 @@ Identifying the firmware version is the foundation of vulnerability assessment. 
 
 The most reliable unauthenticated fingerprinting technique available. Every NetScaler build ships a compressed language resource file at `/vpn/js/rdx/core/lang/rdx_en.json.gz`. The GZIP file format (RFC 1952) stores a modification timestamp in bytes 4-8 of the header (`MTIME` field). This timestamp is set during firmware compilation and uniquely identifies the build.
 
-CitrixScan embeds a **228-entry lookup table** mapping known timestamps to exact firmware versions, covering every release from 12.1-49.23 (August 2018) through 14.1-66.59 (November 2025).
+CitrixScan embeds a **240-entry lookup table** mapping known timestamps to exact firmware versions, covering timestamps from 12.1-49.23 (August 2018) through builds compiled in March 2026.
 
 Credit: [Fox-IT Security Research Team](https://blog.fox-it.com/2022/12/28/cve-2022-27510-cve-2022-27518-measuring-citrix-adc-gateway-version-adoption-on-the-internet/)
 
 **Known limitation:** Some builds compress this file with `gzip -n`, which zeroes out the MTIME field. In those cases, the scanner falls through to other detection vectors.
+
+### Unknown GZIP Timestamps
+
+If the MTIME is valid but absent from `RDX_EN_STAMP_TO_VERSION`, CitrixScan does not treat an inferred version as an exact match. Instead, it:
+
+1. Queries the JSON backend used by the official NetScaler Release Updates page.
+2. Merges the response with the cumulative local cache and the manually maintained Document History file.
+3. Excludes releases published before the firmware compilation timestamp.
+4. Returns up to three candidates: the release before the best candidate, the best candidate, and the following release.
+5. Assigns deterministic relative probabilities centered on the observed seven-day median between compilation and public release.
+
+Example diagnostic:
+
+```text
+heuristic candidates: previous=13.1-60.32 (40.6%, release 2025-11-11, +0d);
+best=13.1-61.23 (54.0%, release 2025-11-13, +2d);
+next=13.1-61.25 (5.4%, release 2025-12-09, +28d)
+```
+
+These percentages rank the displayed candidates; they are not statistically calibrated probabilities. Inferred candidates remain `MEDIUM` confidence and are deliberately not passed to CVE evaluation as an exact installed version.
+
+#### Release Data Files
+
+Both files are resolved relative to `citrixscan.py` and therefore belong in the same directory as the script:
+
+```text
+citrixscan/
+├── citrixscan.py
+├── citrix_document_history.json
+└── citrix_release_cache.json       # generated automatically
+```
+
+- `citrix_release_cache.json` is written automatically after successful release API queries. Updates are cumulative so releases already observed are retained if they later disappear from the API. If the API is unavailable, the existing cache is reused.
+- `citrix_document_history.json` is maintained manually. It supplements the API with replaced or withdrawn builds that are still present in the official NetScaler Document History. If this file is absent or invalid, API and cached releases are still used and the scanner records a diagnostic note.
+
+Minimal Document History structure:
+
+```json
+{
+  "updated_at": "2026-09-22",
+  "releases": [
+    {
+      "full_version": "14.1-51.72",
+      "release_date": "2025-09-08",
+      "variant": "ADC",
+      "source": "document-history"
+    }
+  ]
+}
+```
+
+Use ISO dates (`YYYY-MM-DD`) or ISO 8601 timestamps for `release_date`. Supported variants are currently `ADC` and `FIPS`.
 
 ### 2. NITRO API
 
@@ -223,7 +281,7 @@ usage: citrixscan.py [-h] [-f FILE] [-p PORT] [-t TIMEOUT] [--threads N]
 | `--csv FILE` | CSV report output path | — |
 | `--markdown FILE` | Markdown report output path | — |
 | `-v` | Verbose (paths, ETags, headers, TLS) | off |
-| `--modules LIST` | `all`, `cve`, `ioc`, `misconfig`, `tls`, `headers` | `all` |
+| `--modules LIST` | `all`, `cve`, `ioc`, `misconfig`, `tls`, `headers` | `headers` |
 | `--no-deep` | Skip EPA binary download | off |
 | `--list-cves` | Print CVE database and exit | — |
 | `--version` | Print version and exit | — |
@@ -232,7 +290,7 @@ usage: citrixscan.py [-h] [-f FILE] [-p PORT] [-t TIMEOUT] [--threads N]
 
 ## Architecture
 
-Single Python file (~2,100 lines), zero external dependencies, stdlib only.
+Single Python file (~2,400 lines), zero external dependencies, stdlib only.
 
 ### Scan Phases
 
@@ -245,6 +303,9 @@ Phase 1: Standard Fingerprinting
 
 Phase 2: Extended Probing
   ├── GZIP timestamp extraction (rdx_en.json.gz)
+  ├── Unknown timestamp release inference
+  ├── Release API + cumulative local cache
+  ├── Manually maintained Document History data
   ├── NITRO API / nsversion endpoints
   ├── JavaScript/CSS resource probing
   └── Version pattern matching
@@ -269,6 +330,7 @@ Phase 4: Security Assessment
 Contributions welcome via pull request:
 
 - **GZIP timestamp mappings** — New `stamp → version` entries for the `RDX_EN_STAMP_TO_VERSION` dict
+- **Document History releases** — Replaced or withdrawn builds for `citrix_document_history.json`
 - **CVE entries** — New CVEs following the `CVEEntry` dataclass format
 - **IoC paths** — Webshell/backdoor paths from incident response engagements
 - **EPA size mappings** — Known EPA binary sizes for the `EPA_SIZE_MAP` dict
