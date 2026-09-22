@@ -48,14 +48,17 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import re
 import ssl
 import socket
 import struct
 import sys
 import os
+import threading
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any, Tuple
@@ -1094,6 +1097,307 @@ RDX_EN_STAMP_TO_VERSION = {
 }
 
 
+# Dynamic release lookup used only when the exact GZIP timestamp is not in the
+# hardcoded mapping above. The API is the backend used by the official
+# NetScaler "Release Updates" page. The separate document-history file is
+# intentionally maintained by hand because replaced builds can disappear from
+# that API.
+RELEASE_API_BASE = (
+    "https://us-central1-citrix-product-documentation.cloudfunctions.net/"
+    "issueTrackerData"
+)
+RELEASE_CACHE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "citrix_release_cache.json"
+)
+DOCUMENT_HISTORY_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "citrix_document_history.json"
+)
+RELEASE_EXPECTED_LEAD_DAYS = 7
+
+_release_catalog = None
+_release_catalog_notes = []
+_release_catalog_lock = threading.Lock()
+
+
+def _release_api_get(path: str, params: Optional[dict] = None, timeout: int = 10) -> Any:
+    """Query the JSON backend used by the official NetScaler release page."""
+    query = urllib.parse.urlencode(params or {})
+    url = f"{RELEASE_API_BASE}{path}"
+    if query:
+        url = f"{url}?{query}"
+    request = urllib.request.Request(url, headers={
+        "Origin": "https://docs.netscaler.com",
+        "User-Agent": "citrixscan/1.0",
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(request, timeout=max(3, min(timeout, 20))) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _load_release_file(path: str) -> List[dict]:
+    """Load normalized releases from a cache or manual history JSON file."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return []
+
+    releases = payload.get("releases", []) if isinstance(payload, dict) else []
+    normalized = []
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        full_version = str(release.get("full_version", "")).strip()
+        release_date = str(release.get("release_date", "")).strip()
+        if not full_version or not release_date:
+            continue
+        normalized.append({
+            "full_version": full_version,
+            "release_date": release_date,
+            "variant": str(release.get("variant", "ADC")).strip() or "ADC",
+            "source": str(release.get("source", "cache")).strip() or "cache",
+        })
+    return normalized
+
+
+def _release_key(release: dict) -> tuple:
+    return release["full_version"], release.get("variant", "ADC")
+
+
+def _write_release_cache(releases: List[dict]) -> None:
+    """Atomically persist the cumulative API catalog for later runs."""
+    payload = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "source": RELEASE_API_BASE,
+        "releases": sorted(
+            releases,
+            key=lambda item: (
+                item["release_date"], item["full_version"], item.get("variant", "ADC")
+            ),
+        ),
+    }
+    temporary_path = f"{RELEASE_CACHE_FILE}.tmp"
+    with open(temporary_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.replace(temporary_path, RELEASE_CACHE_FILE)
+
+
+def _fetch_and_cache_releases(timeout: int) -> Tuple[List[dict], List[str]]:
+    """Fetch current releases and merge them into the persistent cache."""
+    notes = []
+    cached = _load_release_file(RELEASE_CACHE_FILE)
+    cumulative = {_release_key(release): release for release in cached}
+
+    try:
+        products = _release_api_get("/products", timeout=timeout)
+        adc_product = next(
+            product for product in products
+            if str(product.get("name", "")).lower() == "citrix adc"
+        )
+        versions = _release_api_get(
+            "/versions", {"productId": adc_product["id"]}, timeout
+        )
+    except (StopIteration, KeyError, TypeError, ValueError, OSError,
+            urllib.error.URLError, json.JSONDecodeError) as exc:
+        notes.append(f"release API unavailable: {exc}")
+        return list(cumulative.values()), notes
+
+    fetched = 0
+    build_results = []
+    with ThreadPoolExecutor(max_workers=max(1, min(5, len(versions)))) as executor:
+        futures = {
+            executor.submit(
+                _release_api_get, "/builds", {"versionId": version["id"]}, timeout
+            ): version
+            for version in versions if version.get("id")
+        }
+        for future in as_completed(futures):
+            version = futures[future]
+            try:
+                build_results.append((version, future.result()))
+            except (KeyError, TypeError, ValueError, OSError,
+                    urllib.error.URLError, json.JSONDecodeError) as exc:
+                notes.append(f"release API build query failed: {exc}")
+
+    for version, builds in build_results:
+        version_name = str(version.get("version", "")).strip()
+        if not version_name:
+            continue
+        is_fips = version_name.upper().endswith(" FIPS")
+        branch = version_name[:-5].strip() if is_fips else version_name
+        variant = "FIPS" if is_fips else "ADC"
+
+        for build in builds:
+            build_number = str(build.get("build_number", "")).strip()
+            release_date = str(build.get("release_date", "")).strip()
+            if not build_number or not release_date:
+                continue
+            release = {
+                "full_version": f"{branch}-{build_number}",
+                "release_date": release_date,
+                "variant": variant,
+                "source": "release-api",
+            }
+            cumulative[_release_key(release)] = release
+            fetched += 1
+
+    if fetched:
+        try:
+            _write_release_cache(list(cumulative.values()))
+        except OSError as exc:
+            notes.append(f"release cache could not be written: {exc}")
+    else:
+        notes.append("release API returned no builds")
+
+    return list(cumulative.values()), notes
+
+
+def _parse_release_datetime(value: str) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _get_release_catalog(timeout: int) -> Tuple[List[dict], List[str]]:
+    """Return API/cache releases plus manually maintained document history."""
+    global _release_catalog, _release_catalog_notes
+    if _release_catalog is not None:
+        return _release_catalog, _release_catalog_notes
+
+    with _release_catalog_lock:
+        if _release_catalog is not None:
+            return _release_catalog, _release_catalog_notes
+
+        api_releases, notes = _fetch_and_cache_releases(timeout)
+        history_releases = _load_release_file(DOCUMENT_HISTORY_FILE)
+        if not history_releases:
+            notes.append(f"document history unavailable: {DOCUMENT_HISTORY_FILE}")
+
+        # Prefer the API timestamp where both sources contain the same build;
+        # the manual file fills gaps left by superseded API entries.
+        combined = {_release_key(release): release for release in history_releases}
+        for release in api_releases:
+            combined[_release_key(release)] = release
+
+        _release_catalog = list(combined.values())
+        _release_catalog_notes = notes
+        return _release_catalog, _release_catalog_notes
+
+
+def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict], List[str]]:
+    """Return previous/best/next plausible releases for an unknown GZIP MTIME."""
+    build_datetime = datetime.fromtimestamp(stamp, timezone.utc)
+    build_date = build_datetime.date()
+    catalog, notes = _get_release_catalog(timeout)
+
+    possible = []
+    for release in catalog:
+        release_datetime = _parse_release_datetime(release.get("release_date", ""))
+        if not release_datetime:
+            continue
+        lead_days = (release_datetime.date() - build_date).days
+        if lead_days < 0:
+            continue
+        possible.append({
+            **release,
+            "release_datetime": release_datetime,
+            "lead_days": lead_days,
+        })
+
+    if not possible:
+        return [], notes
+
+    possible.sort(key=lambda item: (
+        item["release_datetime"],
+        0 if item.get("variant", "ADC") == "ADC" else 1,
+        item["full_version"],
+    ))
+    best = min(possible, key=lambda item: (
+        abs(item["lead_days"] - RELEASE_EXPECTED_LEAD_DAYS),
+        item["lead_days"],
+        0 if item.get("variant", "ADC") == "ADC" else 1,
+        item["full_version"],
+    ))
+    best_date = best["release_datetime"].date()
+
+    previous_options = [
+        item for item in possible if item["release_datetime"].date() < best_date
+    ]
+    next_options = [
+        item for item in possible if item["release_datetime"].date() > best_date
+    ]
+
+    selected = []
+    if previous_options:
+        previous_date = max(item["release_datetime"].date() for item in previous_options)
+        previous = min(
+            (item for item in previous_options
+             if item["release_datetime"].date() == previous_date),
+            key=lambda item: (
+                0 if item.get("variant", "ADC") == "ADC" else 1,
+                item["full_version"],
+            ),
+        )
+        selected.append(("previous", previous))
+
+    selected.append(("best", best))
+
+    if next_options:
+        next_date = min(item["release_datetime"].date() for item in next_options)
+        following = min(
+            (item for item in next_options
+             if item["release_datetime"].date() == next_date),
+            key=lambda item: (
+                0 if item.get("variant", "ADC") == "ADC" else 1,
+                item["full_version"],
+            ),
+        )
+        selected.append(("next", following))
+
+    # Deterministic heuristic likelihood centered on the observed seven-day
+    # median. These percentages rank the selected candidates; they are not a
+    # statistically calibrated guarantee.
+    weights = [
+        math.exp(-abs(item["lead_days"] - RELEASE_EXPECTED_LEAD_DAYS) / 7.0)
+        for _, item in selected
+    ]
+    weight_total = sum(weights)
+    probabilities = [round(weight / weight_total * 100.0, 1) for weight in weights]
+    if probabilities:
+        probabilities[-1] = round(probabilities[-1] + 100.0 - sum(probabilities), 1)
+
+    candidates = []
+    for (position, item), probability in zip(selected, probabilities):
+        candidates.append({
+            "position": position,
+            "full_version": item["full_version"],
+            "variant": item.get("variant", "ADC"),
+            "release_date": item["release_datetime"].date().isoformat(),
+            "lead_days": item["lead_days"],
+            "probability": probability,
+            "source": item.get("source", "unknown"),
+        })
+    return candidates, notes
+
+
+def _format_release_candidates(candidates: List[dict]) -> str:
+    formatted = []
+    for candidate in candidates:
+        variant = candidate.get("variant", "ADC")
+        variant_suffix = f"/{variant}" if variant != "ADC" else ""
+        formatted.append(
+            f"{candidate['position']}={candidate['full_version']}{variant_suffix} "
+            f"({candidate['probability']:.1f}%, release {candidate['release_date']}, "
+            f"+{candidate['lead_days']}d)"
+        )
+    return "; ".join(formatted)
+
+
 def extract_version(responses, extended_responses, paths_tried, ctx, host, port, timeout) -> Tuple[str, str, str, str]:
     """Multi-vector version extraction. Returns (raw, source, confidence, diagnostic).
 
@@ -1145,9 +1449,20 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
                     return (version, f"GZIP timestamp {gzip_path} (stamp={stamp}, {dt_str})", "HIGH", "")
                 else:
                     dt_str = datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                    return (f"unknown (stamp={stamp}, {dt_str})",
-                            f"GZIP timestamp {gzip_path} (not in lookup table)", "MEDIUM",
-                            f"rdx_en stamp={stamp} dt={dt_str} — not in {len(RDX_EN_STAMP_TO_VERSION)}-entry lookup table")
+                    candidates, lookup_notes = infer_release_candidates(stamp, timeout)
+                    candidate_text = _format_release_candidates(candidates)
+                    source = f"GZIP timestamp {gzip_path} (not in lookup table)"
+                    if candidate_text:
+                        source += f"; heuristic candidates: {candidate_text}"
+                    diagnostic = (
+                        f"rdx_en stamp={stamp} dt={dt_str} — not in "
+                        f"{len(RDX_EN_STAMP_TO_VERSION)}-entry lookup table"
+                    )
+                    if lookup_notes:
+                        diagnostic += f"; {'; '.join(lookup_notes)}"
+                    # Keep the raw version empty so inferred candidates are not
+                    # treated as an exact version during CVE evaluation.
+                    return ("", source, "MEDIUM" if candidates else "LOW", diagnostic)
             elif stamp == 0:
                 all_diags.append(f"{gzip_path} — GZIP valid but MTIME=0 (timestamp stripped, likely gzip -n / reproducible build)")
                 # Don't break — try other paths which may have a real timestamp

@@ -1,0 +1,206 @@
+{
+  "description": "Manually maintained NetScaler releases missing from or supplementing the Release Updates API. Update this file from the official Document History pages.",
+  "updated_at": "2026-09-22",
+  "sources": [
+    "https://docs.netscaler.com/en-us/citrix-adc/13-1/document-history.html",
+    "https://docs.netscaler.com/en-us/citrix-adc/current-release/document-history.html"
+  ],
+  "maintenance": "Add one entry for every explicit release or replacement entry. Keep release_date in YYYY-MM-DD format and distinguish ADC from FIPS with variant.",
+  "notes": [
+    "The 13.1 Document History renders the 2026-08-19 FIPS build as 13.1-32.277; this file normalizes it to 13.1-37.277 to match the surrounding FIPS train and the official Release Updates API."
+  ],
+  "releases": [
+    {
+      "full_version": "13.1-60.26",
+      "release_date": "2025-09-08",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-51.72",
+      "release_date": "2025-09-08",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-60.29",
+      "release_date": "2025-09-29",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-51.80",
+      "release_date": "2025-09-29",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-56.71",
+      "release_date": "2025-10-24",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-60.32",
+      "release_date": "2025-11-11",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-56.74",
+      "release_date": "2025-11-11",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-61.23",
+      "release_date": "2025-11-13",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-37.255",
+      "release_date": "2025-12-09",
+      "variant": "FIPS",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-61.25",
+      "release_date": "2025-12-09",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-60.52",
+      "release_date": "2025-12-09",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-61.26",
+      "release_date": "2026-01-20",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-60.57",
+      "release_date": "2026-01-20",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-62.21",
+      "release_date": "2026-03-06",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-62.23",
+      "release_date": "2026-03-23",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-66.59",
+      "release_date": "2026-03-23",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-60.58",
+      "release_date": "2026-03-24",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-37.268",
+      "release_date": "2026-04-07",
+      "variant": "FIPS",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-66.68",
+      "release_date": "2026-05-06",
+      "variant": "FIPS",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-63.16",
+      "release_date": "2026-05-08",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-72.57",
+      "release_date": "2026-05-27",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-37.272",
+      "release_date": "2026-06-30",
+      "variant": "FIPS",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-63.18",
+      "release_date": "2026-06-30",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-72.61",
+      "release_date": "2026-06-30",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-72.61",
+      "release_date": "2026-06-30",
+      "variant": "FIPS",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-63.19",
+      "release_date": "2026-07-17",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-73.30",
+      "release_date": "2026-07-30",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-37.277",
+      "release_date": "2026-08-19",
+      "variant": "FIPS",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-63.21",
+      "release_date": "2026-08-19",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-73.33",
+      "release_date": "2026-08-19",
+      "variant": "ADC",
+      "source": "document-history"
+    },
+    {
+      "full_version": "14.1-73.33",
+      "release_date": "2026-08-19",
+      "variant": "FIPS",
+      "source": "document-history"
+    },
+    {
+      "full_version": "13.1-64.22",
+      "release_date": "2026-09-02",
+      "variant": "ADC",
+      "source": "document-history"
+    }
+  ]
+}
