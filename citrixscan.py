@@ -418,6 +418,24 @@ EOL_BRANCHES = {"10.5", "11.1", "12.0", "12.1", "13.0"}
 # Currently supported branches
 SUPPORTED_BRANCHES = {"13.1", "14.1"}
 
+VALID_SCAN_MODULES = frozenset({"cve", "ioc", "misconfig", "tls", "headers"})
+
+
+def normalize_modules(modules) -> frozenset:
+    """Return a validated, normalized set of requested assessment modules."""
+    if isinstance(modules, str):
+        selected = {item.strip().lower() for item in modules.split(",") if item.strip()}
+    else:
+        selected = {str(item).strip().lower() for item in modules if str(item).strip()}
+    if not selected:
+        raise ValueError("at least one scan module must be selected")
+    invalid = selected - VALID_SCAN_MODULES - {"all"}
+    if invalid:
+        raise ValueError(f"unknown scan module(s): {', '.join(sorted(invalid))}")
+    if "all" in selected:
+        return VALID_SCAN_MODULES
+    return frozenset(selected)
+
 
 def parse_netscaler_version(version_str: str) -> Optional[tuple]:
     """Parse NetScaler firmware version. Returns (major, minor, build, patch) or None.
@@ -627,8 +645,16 @@ def http_get_binary(host, port, path, ctx, timeout=30, max_bytes=20*1024*1024):
         handler = urllib.request.HTTPSHandler(context=ctx)
         opener = urllib.request.build_opener(handler)
         resp = opener.open(req, timeout=timeout)
-        data = resp.read(max_bytes)
-        return {"status": resp.status, "headers": dict(resp.headers), "data": data, "size": len(data)}
+        raw = resp.read(max_bytes + 1)
+        truncated = len(raw) > max_bytes
+        data = raw[:max_bytes]
+        return {
+            "status": resp.status,
+            "headers": dict(resp.headers),
+            "data": data,
+            "size": len(data),
+            "truncated": truncated,
+        }
     except Exception:
         return None
 
@@ -647,10 +673,16 @@ EXTENDED_PATHS = [
     "/nitro/v1/config/nsversion", "/vpn/pluginlist.xml",
     "/vpn/js/gateway_login_view.js", "/logon/LogonPoint/custom/strings.en.js",
     "/epatype", "/nsversion", "/vpn/versioninfo.xml",
+    "/cgi/samlauth", "/vpn/tmindex.html",
     "/vpn/js/rdx/core/lang/rdx_en.json.gz",  # GZIP timestamp fingerprinting
 ]
 
 EPA_PATHS = ["/epa/scripts/win/nsepa_setup.exe", "/epa/scripts/win/nsepa_setup64.exe"]
+
+MANAGEMENT_PATHS = [
+    "/menu/neo", "/menu/ss", "/gui/",
+    "/nitro/v1/config/nsconfig", "/nitro/v1/config/nshardware",
+]
 
 # IoC / post-exploitation artifact paths
 IOC_PATHS = [
@@ -720,7 +752,7 @@ def extract_pe_version(data: bytes) -> Optional[str]:
       2. Scan FileVersion/ProductVersion resource strings for firmware-range versions
       3. VS_FIXEDFILEINFO as last resort with strict validation
     """
-    if not data or len(data) < 1024:
+    if not data or len(data) < 1024 or data[:2] != b"MZ":
         return None
 
     # Method 1 (best): ASCII string scan for NetScaler firmware patterns
@@ -771,6 +803,43 @@ def extract_pe_version(data: bytes) -> Optional[str]:
         except Exception:
             pass
 
+    return None
+
+
+def probe_epa_availability(host, port, ctx, timeout, verify_binary: bool) -> Optional[str]:
+    """Return the first plausible EPA path, avoiding generic HTTP-200 pages."""
+    for epa_path in EPA_PATHS:
+        head = http_get(host, port, epa_path, ctx, timeout, method="HEAD")
+        head_available = bool(head and head["status"] == 200)
+        headers = {
+            key.lower(): value
+            for key, value in (head.get("headers", {}) if head_available else {}).items()
+        }
+        content_type = headers.get("content-type", "").lower()
+        disposition = headers.get("content-disposition", "").lower()
+        try:
+            size = int(headers.get("content-length", "0"))
+        except ValueError:
+            size = 0
+
+        if verify_binary:
+            prefix = http_get_binary(host, port, epa_path, ctx, timeout, max_bytes=2)
+            if prefix and prefix["status"] == 200 and prefix.get("data", b"")[:2] == b"MZ":
+                return epa_path
+            continue
+
+        if not head_available:
+            continue
+
+        # With --no-deep, do not GET the executable. Require binary-looking
+        # HEAD metadata instead of treating every generic 200 page as EPA.
+        if (
+            ".exe" in disposition
+            or "octet-stream" in content_type
+            or "application/x-msdownload" in content_type
+            or size >= 1024 * 1024
+        ):
+            return epa_path
     return None
 
 
@@ -889,6 +958,7 @@ class ScanResult:
     aaa_detected: bool = False
     mgmt_exposed: bool = False
     epa_available: bool = False
+    deep_scan_enabled: bool = True
     nitro_accessible: bool = False
     server_header: str = ""
     # CVE results
@@ -953,8 +1023,6 @@ def detect_config(responses: list, paths_tried: dict) -> dict:
     oauth_idp_paths = ["/oauth/idp/.well-known/openid-configuration"]
     gw_paths = ["/vpn/index.html", "/logon/LogonPoint/index.html", "/cgi/login",
                 "/nf/auth/doAuthentication.do", "/vpn/tmindex.html"]
-    mgmt_paths = ["/menu/neo", "/menu/ss", "/gui/",
-                  "/nitro/v1/config/nsconfig", "/nitro/v1/config/nshardware"]
 
     for p in saml_idp_paths:
         resp = paths_tried.get(p)
@@ -975,7 +1043,7 @@ def detect_config(responses: list, paths_tried: dict) -> dict:
         if resp and resp["status"] in (200, 301, 302, 307, 401):
             config["gateway"] = True
             break
-    for p in mgmt_paths:
+    for p in MANAGEMENT_PATHS:
         resp = paths_tried.get(p)
         if resp and resp["status"] in (200, 301, 302):
             body = resp.get("body", "")
@@ -1399,7 +1467,9 @@ def _format_release_candidates(candidates: List[dict]) -> str:
     return "; ".join(formatted)
 
 
-def extract_version(responses, extended_responses, paths_tried, ctx, host, port, timeout) -> Tuple[str, str, str, str]:
+def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
+                    timeout, deep_scan: bool = True,
+                    allow_epa_download: bool = True) -> Tuple[str, str, str, str]:
     """Multi-vector version extraction. Returns (raw, source, confidence, diagnostic).
 
     Priority order:
@@ -1411,6 +1481,8 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
       6. Content-Length / hash fingerprints
     """
     diagnostic = ""
+    inferred_source = ""
+    inferred_confidence = ""
 
     # 1. GZIP timestamp from resource files (Fox-IT technique)
     # The GZIP MTIME field (bytes 4-8) contains the build compilation timestamp.
@@ -1421,8 +1493,6 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
         "/vpn/js/rdx/core/lang-ext/rdx_en.json.gz",
         "/vpn/js/rdx/core/lang/rdx_en.json",  # Some builds serve uncompressed with GZIP encoding
     ]
-    rdx_stamp = None
-
     all_diags = []
 
     for gzip_path in gzip_paths:
@@ -1443,7 +1513,6 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
         if len(data) >= 20 and data[0:2] == b"\x1f\x8b":
             stamp = int.from_bytes(data[4:8], "little")
             if 1500000000 < stamp < 2000000000:
-                rdx_stamp = stamp
                 version = RDX_EN_STAMP_TO_VERSION.get(stamp)
                 if version and version != "unknown":
                     dt_str = datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -1455,15 +1524,19 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
                     source = f"GZIP timestamp {gzip_path} (not in lookup table)"
                     if candidate_text:
                         source += f"; heuristic candidates: {candidate_text}"
-                    diagnostic = (
+                    unknown_diagnostic = (
                         f"rdx_en stamp={stamp} dt={dt_str} — not in "
                         f"{len(RDX_EN_STAMP_TO_VERSION)}-entry lookup table"
                     )
                     if lookup_notes:
-                        diagnostic += f"; {'; '.join(lookup_notes)}"
-                    # Keep the raw version empty so inferred candidates are not
-                    # treated as an exact version during CVE evaluation.
-                    return ("", source, "MEDIUM" if candidates else "LOW", diagnostic)
+                        unknown_diagnostic += f"; {'; '.join(lookup_notes)}"
+                    all_diags.append(unknown_diagnostic)
+                    if not inferred_source:
+                        inferred_source = source
+                        inferred_confidence = "MEDIUM" if candidates else "LOW"
+                    # Inferred releases are not exact versions. Keep searching
+                    # for an authoritative NITRO/header/body/EPA fingerprint.
+                    continue
             elif stamp == 0:
                 all_diags.append(f"{gzip_path} — GZIP valid but MTIME=0 (timestamp stripped, likely gzip -n / reproducible build)")
                 # Don't break — try other paths which may have a real timestamp
@@ -1522,40 +1595,77 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
                     return (ver_str, f"Response body ({resp.get('url','')})", "MEDIUM", diagnostic)
 
     # 4. EPA binary analysis (PE extraction + Content-Length fingerprint)
-    epa_info = {}
+    epa_diagnostics = []
+    max_epa_bytes = 20 * 1024 * 1024
     for epa_path in EPA_PATHS:
         head = http_get(host, port, epa_path, ctx, timeout, method="HEAD")
-        if head and head["status"] == 200:
-            cl = head["headers"].get("Content-Length", "0")
+        head_available = bool(head and head["status"] == 200)
+        size = 0
+        if head_available:
+            headers_lower = {key.lower(): value for key, value in head["headers"].items()}
+            cl = headers_lower.get("content-length", "0")
             try:
                 size = int(cl)
             except ValueError:
                 size = 0
-            epa_info["available"] = True
-            epa_info["size"] = size
-            epa_info["path"] = epa_path
 
-            # 4a. Content-Length fingerprint (known EPA sizes → firmware builds)
-            # EPA binary sizes are unique per NetScaler release. This mapping can
-            # be populated from your fleet baselines. Format: size_bytes → "NS version string"
-            # Example: EPA_SIZE_MAP = {14432360: "NS14.1: Build 65.11", ...}
-            EPA_SIZE_MAP = {
-                # Add known mappings from your fleet here:
-                # 14432360: "NS14.1: Build 65.11",
-            }
-            if size in EPA_SIZE_MAP:
-                ver_str = EPA_SIZE_MAP[size]
-                if parse_netscaler_version(ver_str):
-                    return (ver_str, f"EPA Content-Length fingerprint ({size} bytes)", "MEDIUM", diagnostic)
+        # 4a. Content-Length fingerprint (known EPA sizes → firmware builds)
+        # EPA binary sizes are unique per NetScaler release. This mapping can
+        # be populated from your fleet baselines. Format: size_bytes → "NS version string"
+        # Example: EPA_SIZE_MAP = {14432360: "NS14.1: Build 65.11", ...}
+        EPA_SIZE_MAP = {
+            # Add known mappings from your fleet here:
+            # 14432360: "NS14.1: Build 65.11",
+        }
+        if size in EPA_SIZE_MAP:
+            ver_str = EPA_SIZE_MAP[size]
+            if parse_netscaler_version(ver_str):
+                return (ver_str, f"EPA Content-Length fingerprint ({size} bytes)", "MEDIUM", diagnostic)
 
-            # 4b. PE binary deep scan — download and search for firmware strings
-            if 0 < size <= 20 * 1024 * 1024:
-                bin_resp = http_get_binary(host, port, epa_path, ctx, timeout)
-                if bin_resp and bin_resp["status"] == 200 and bin_resp["data"]:
-                    epa_ver = extract_pe_version(bin_resp["data"])
-                    if epa_ver and parse_netscaler_version(epa_ver):
-                        return (epa_ver, f"EPA binary PE ({epa_path}, {len(bin_resp['data'])} bytes)", "HIGH", diagnostic)
-            break  # Only try first available EPA path
+        # 4b. PE binary deep scan — download and search for firmware strings.
+        # A capped GET is still attempted when HEAD is unsupported or omits
+        # Content-Length; otherwise valid EPA binaries would be unreachable.
+        epa_deep_scan = deep_scan and (allow_epa_download or bool(inferred_source))
+        if not epa_deep_scan:
+            if head_available:
+                reason = "--no-deep" if not deep_scan else "target not yet identified as NetScaler"
+                epa_diagnostics.append(f"{epa_path} — automatic PE analysis skipped ({reason})")
+            continue
+        if size > max_epa_bytes:
+            epa_diagnostics.append(
+                f"{epa_path} — {size} bytes exceeds {max_epa_bytes}-byte safety limit"
+            )
+            continue
+        bin_resp = http_get_binary(
+            host, port, epa_path, ctx, timeout, max_bytes=max_epa_bytes
+        )
+        if not bin_resp or bin_resp["status"] != 200 or not bin_resp["data"]:
+            if head_available:
+                epa_diagnostics.append(f"{epa_path} — download failed")
+            continue
+        if bin_resp.get("truncated"):
+            epa_diagnostics.append(
+                f"{epa_path} — download exceeded {max_epa_bytes}-byte safety limit"
+            )
+            continue
+        if bin_resp["data"][:2] != b"MZ":
+            epa_diagnostics.append(f"{epa_path} — HTTP 200 response is not a PE executable")
+            continue
+        epa_ver = extract_pe_version(bin_resp["data"])
+        if epa_ver and parse_netscaler_version(epa_ver):
+            return (
+                epa_ver,
+                f"EPA binary PE ({epa_path}, {len(bin_resp['data'])} bytes)",
+                "HIGH",
+                diagnostic,
+            )
+        epa_diagnostics.append(
+            f"{epa_path} — valid PE but no NetScaler firmware version string found"
+        )
+
+    if epa_diagnostics:
+        epa_text = "EPA: " + " | ".join(epa_diagnostics)
+        diagnostic = f"{diagnostic}; {epa_text}" if diagnostic else epa_text
 
     # 5. Login page / static resource hash fingerprint
     # The login page HTML and JS content changes with each build. Hash them
@@ -1579,7 +1689,7 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
                 if parse_netscaler_version(ver_str):
                     return (ver_str, f"Page hash fingerprint ({hp}: {h})", "MEDIUM", diagnostic)
 
-    return ("", "", "", diagnostic)
+    return ("", inferred_source, inferred_confidence, diagnostic)
 
 
 def check_security_headers(responses: list) -> list:
@@ -1617,9 +1727,9 @@ STOCK_NETSCALER_FILES = {
 WEBSHELL_INDICATORS = [
     "<?php", "eval(", "base64_decode(", "system(", "exec(",
     "passthru(", "shell_exec(", "popen(", "proc_open(",
-    "assert(", "preg_replace.*e", "create_function(",
+    "assert(", "preg_replace(", "create_function(",
     "#!/usr/bin/perl", "#!/bin/sh", "#!/bin/bash",
-    "`$_", "$_GET", "$_POST", "$_REQUEST", "$_FILES",
+    "`$_", "$_get", "$_post", "$_request", "$_files",
     "cmd.exe", "/bin/sh -c", "wget ", "curl ",
     "nc -e", "reverse", "bind_shell", "backdoor",
 ]
@@ -1800,7 +1910,12 @@ def check_misconfigs(host, port, ctx, timeout, paths_tried) -> list:
             if path.startswith("/nitro/"):
                 # Verify it's actual JSON API response, not login page
                 if is_actual_api_response(body_raw, "json"):
-                    if "errorcode" not in body or '"errorcode": 0' in body.replace(" ", "").replace("'", '"'):
+                    try:
+                        api_data = json.loads(body_raw)
+                    except (json.JSONDecodeError, TypeError):
+                        api_data = None
+                    errorcode = api_data.get("errorcode") if isinstance(api_data, dict) else None
+                    if errorcode in (None, 0, "0"):
                         findings.append({
                             "severity": "CRITICAL" if "nsconfig" in path or "nsip" in path else "HIGH",
                             "path": path,
@@ -1916,7 +2031,15 @@ def build_recommendations(result: ScanResult) -> list:
         if result.saml_idp_detected or result.gateway_detected:
             recs.append("  → Vulnerable config detected. ASSUME VULNERABLE until version confirmed.")
         if result.epa_available:
-            recs.append("  → EPA binary downloadable. Download nsepa_setup.exe and check file properties for version.")
+            if result.deep_scan_enabled:
+                recs.append(
+                    "  → EPA binary verified, but automatic analysis did not yield a usable "
+                    "NetScaler firmware version. See the fingerprint diagnostic; manual analysis may still help."
+                )
+            else:
+                recs.append(
+                    "  → EPA binary available. Rerun without --no-deep to download and parse it automatically."
+                )
         recs.append("  → Or use NITRO API with credentials: curl -k -u nsroot:pass https://<IP>/nitro/v1/config/nsversion")
         if result.etag_values:
             recs.append(f"  → ETag fingerprints collected ({len(result.etag_values)} paths) — compare against known builds for identification.")
@@ -1930,12 +2053,14 @@ def build_recommendations(result: ScanResult) -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def scan_target(target: str, port: int = 443, timeout: int = 15,
-                modules: str = "headers", deep_scan: bool = False) -> ScanResult:
+                modules: str = "headers", deep_scan: bool = True) -> ScanResult:
     """Full-scope security scan of a single target."""
     start_time = datetime.now(timezone.utc)
+    selected_modules = normalize_modules(modules)
     result = ScanResult(
         target=target, ip=target, port=port,
         timestamp=start_time.isoformat(),
+        deep_scan_enabled=deep_scan,
     )
     ctx = create_ssl_context()
 
@@ -1965,7 +2090,7 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
     result.tls_san = tls_info["san"]
     result.tls_issuer = tls_info["issuer"]
     result.tls_expiry = tls_info["not_after"]
-    if "tls" in modules or modules == "all":
+    if "tls" in selected_modules:
         result.tls_findings = audit_tls(tls_info)
 
     # ── Phase 1: Standard Fingerprinting ──
@@ -1988,13 +2113,10 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
     if root_resp:
         result.accessible_paths.append(f"/ [{root_resp['status']}]")
 
-    # Product detection
+    # Preliminary product detection. Extended fingerprints are still collected
+    # if this first pass is inconclusive; otherwise the primary GZIP/NITRO
+    # methods would be unreachable on hardened appliances.
     result.is_netscaler = detect_product(responses, tls_info)
-    if not result.is_netscaler:
-        result.risk_rating = calculate_risk(result)
-        result.recommendations = build_recommendations(result)
-        result.scan_duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-        return result
 
     # ── Phase 2: Extended Probing ──
     extended_responses = []
@@ -2014,31 +2136,35 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
                 elif resp["status"] == 200 and not is_login_page(body):
                     result.nitro_accessible = True  # 200 with actual data = accessible
 
-    # Config detection
+    result.is_netscaler = result.is_netscaler or detect_product(
+        responses + extended_responses, tls_info
+    )
+
+    # Config detection from the standard and extended fingerprint paths.
     config = detect_config(responses + extended_responses, paths_tried)
-    result.saml_idp_detected = config["saml_idp"]
-    result.saml_sp_detected = config.get("saml_sp", False)
-    result.oauth_idp_detected = config.get("oauth_idp", False)
-    result.gateway_detected = config["gateway"]
-    result.aaa_detected = config.get("aaa", False)
-    result.mgmt_exposed = config["mgmt_exposed"]
 
     # Version extraction
     ver_raw, ver_src, ver_conf, ver_diag = extract_version(
-        responses, extended_responses, paths_tried, ctx, target, port, timeout
+        responses, extended_responses, paths_tried, ctx, target, port, timeout,
+        deep_scan=deep_scan, allow_epa_download=result.is_netscaler,
     )
     result.version_raw = ver_raw
     result.version_source = ver_src
     result.version_confidence = ver_conf
     result.rdx_en_status = ver_diag
 
-    # Check EPA availability (HEAD check if not already done during version extraction)
-    for epa_path in EPA_PATHS:
-        head = http_get(target, port, epa_path, ctx, timeout, method="HEAD")
-        if head and head["status"] == 200:
+    if ver_raw or ver_src.startswith(("GZIP timestamp", "NITRO API", "/nsversion", "EPA ")):
+        result.is_netscaler = True
+
+    # Validate EPA availability. With deep scanning enabled, verify the PE magic
+    # rather than treating an arbitrary HTTP 200/login response as EPA.
+    if result.is_netscaler:
+        epa_path = probe_epa_availability(
+            target, port, ctx, timeout, verify_binary=deep_scan
+        )
+        if epa_path:
             result.epa_available = True
-            result.accessible_paths.append(f"{epa_path} [200/HEAD]")
-            break
+            result.accessible_paths.append(f"{epa_path} [EPA verified]")
 
     if ver_raw:
         result.version_parsed = parse_netscaler_version(ver_raw)
@@ -2047,8 +2173,34 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
         result.branch = f"{result.version_parsed[0]}.{result.version_parsed[1]}"
         result.eol = result.branch in EOL_BRANCHES
 
+    if not result.is_netscaler:
+        result.risk_rating = calculate_risk(result)
+        result.recommendations = build_recommendations(result)
+        result.scan_duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+        return result
+
+    # Management paths are needed for management-interface CVE prerequisites,
+    # but are only probed when CVE or misconfiguration assessment was requested.
+    if selected_modules & {"cve", "misconfig"}:
+        for path in MANAGEMENT_PATHS:
+            if path in paths_tried:
+                continue
+            resp = http_get(target, port, path, ctx, timeout)
+            paths_tried[path] = resp
+            extended_responses.append(resp)
+            if resp:
+                result.accessible_paths.append(f"{path} [{resp['status']}]")
+
+    config = detect_config(responses + extended_responses, paths_tried)
+    result.saml_idp_detected = config["saml_idp"]
+    result.saml_sp_detected = config.get("saml_sp", False)
+    result.oauth_idp_detected = config.get("oauth_idp", False)
+    result.gateway_detected = config["gateway"]
+    result.aaa_detected = config.get("aaa", False)
+    result.mgmt_exposed = config["mgmt_exposed"]
+
     # ── CVE Assessment ──
-    if "cve" in modules or modules == "all":
+    if "cve" in selected_modules:
         if result.version_parsed:
             for cve in CVE_DATABASE:
                 res = check_cve_applicability(result.version_parsed, config, cve)
@@ -2070,15 +2222,15 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
                         result.exploited_itw_vulns += 1
 
     # ── IoC Detection ──
-    if "ioc" in modules or modules == "all":
+    if "ioc" in selected_modules:
         result.ioc_findings = check_iocs(target, port, ctx, timeout)
 
     # ── Misconfiguration Checks ──
-    if "misconfig" in modules or modules == "all":
+    if "misconfig" in selected_modules:
         result.misconfig_findings = check_misconfigs(target, port, ctx, timeout, paths_tried)
 
     # ── Security Headers ──
-    if "headers" in modules or modules == "all":
+    if "headers" in selected_modules:
         result.header_findings = check_security_headers(responses)
 
     # ── Final Assessment ──
@@ -2385,6 +2537,11 @@ def main():
         print(f"\n{B}Legend:{R} 🔥 = Exploited in the wild  ⚡ = Public PoC available\n")
         sys.exit(0)
 
+    try:
+        selected_modules = normalize_modules(args.modules)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     targets = list(args.targets) if args.targets else []
     if args.file:
         try:
@@ -2406,14 +2563,16 @@ def main():
 
     print(BANNER)
     print(f"  Targets: {len(targets)} │ Port: {args.port} │ Threads: {args.threads}")
-    print(f"  Modules: {args.modules} │ CVE DB: {len(CVE_DATABASE)} entries")
+    print(f"  Modules: {','.join(sorted(selected_modules))} │ CVE DB: {len(CVE_DATABASE)} entries")
     print(f"  Started: {datetime.now(timezone.utc).isoformat()}")
     print(f"{'─'*80}")
 
     results = []
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         futures = {
-            executor.submit(scan_target, t, args.port, args.timeout, args.modules, not args.no_deep): t
+            executor.submit(
+                scan_target, t, args.port, args.timeout, selected_modules, not args.no_deep
+            ): t
             for t in targets
         }
         for future in as_completed(futures):
