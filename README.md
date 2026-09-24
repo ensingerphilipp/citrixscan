@@ -51,7 +51,7 @@ python3 citrixscan.py 10.0.0.1 --no-deep -v
 - **Python 3.8+**
 - **No external dependencies** — stdlib only
 - Network access to target(s) on HTTPS port
-- For unknown GZIP timestamps: outbound HTTPS access to the official NetScaler release-data service, or an existing local release cache
+- At scan startup: outbound HTTPS access to the official NetScaler release-data service, or an existing local release cache / manual Document History file
 
 ---
 
@@ -61,7 +61,7 @@ Identifying the firmware version is the foundation of vulnerability assessment. 
 
 ### 1. GZIP Timestamp Extraction (Primary — Highest Accuracy)
 
-The most reliable unauthenticated fingerprinting technique available. Every NetScaler build ships a compressed language resource file at `/vpn/js/rdx/core/lang/rdx_en.json.gz`. The GZIP file format (RFC 1952) stores a modification timestamp in bytes 4-8 of the header (`MTIME` field). This timestamp is set during firmware compilation and uniquely identifies the build.
+The primary unauthenticated fingerprinting technique. The compressed language resource at `/vpn/js/rdx/core/lang/rdx_en.json.gz` can expose a GZIP modification timestamp in bytes 4-8 of its header (`MTIME` field, RFC 1952). A timestamp present in the hardcoded lookup identifies a known build; an unknown timestamp is only a fallback indicator because resources may be refreshed or reused independently.
 
 CitrixScan embeds a **240-entry lookup table** mapping known timestamps to exact firmware versions, covering timestamps from 12.1-49.23 (August 2018) through builds compiled in March 2026.
 
@@ -73,21 +73,23 @@ Credit: [Fox-IT Security Research Team](https://blog.fox-it.com/2022/12/28/cve-2
 
 If the MTIME is valid but absent from `RDX_EN_STAMP_TO_VERSION`, CitrixScan does not treat an inferred version as an exact match. Instead, it:
 
-1. Queries the JSON backend used by the official NetScaler Release Updates page.
-2. Merges the response with the cumulative local cache and the manually maintained Document History file.
-3. Excludes releases published before the firmware compilation timestamp.
-4. Returns up to three candidates: the release before the best candidate, the best candidate, and the following release.
-5. Assigns deterministic relative probabilities centered on the observed seven-day median between compilation and public release.
+1. At every scan startup, queries the JSON backend used by the official NetScaler Release Updates page (regardless of selected modules or observed timestamps).
+2. Merges the response with the cumulative local cache and the manually maintained Document History file, then persists the merged catalog next to `citrixscan.py`. If the API is unavailable, cached and manual entries still work.
+3. Ranks releases by their proximity to the observed MTIME, including releases **before** it: a GZIP resource can be refreshed independently of the installed firmware.
+4. Returns up to three nearby candidates: the release before the best candidate, the best candidate, and the following release.
+5. Assigns deterministic relative proximity scores to the displayed candidates.
 
-Example diagnostic:
+Illustrative output for an MTIME dated 2025-11-15 (with these three releases available):
 
 ```text
-heuristic candidates: previous=13.1-60.32 (40.6%, release 2025-11-11, +0d);
-best=13.1-61.23 (54.0%, release 2025-11-13, +2d);
-next=13.1-61.25 (5.4%, release 2025-12-09, +28d)
+Version    : UNKNOWN
+Fallback indicator (not a firmware version, LOW): GZIP MTIME ...;
+nearby releases: previous=13.1-60.32 (41.9% relative score, release 2025-11-11, -4d);
+best=13.1-61.23 (55.7% relative score, release 2025-11-13, -2d);
+next=13.1-61.25 (2.4% relative score, release 2025-12-09, +24d)
 ```
 
-These percentages rank the displayed candidates; they are not statistically calibrated probabilities. Inferred candidates remain `MEDIUM` confidence and are deliberately not passed to CVE evaluation as an exact installed version.
+The percentages are relative ranking scores, **not** calibrated probabilities. The indicator is `LOW` confidence. It is never shown as an identified firmware version and is not used for EOL or CVE evaluation. An exact hardcoded GZIP match remains a high-confidence version fingerprint.
 
 #### Release Data Files
 
@@ -100,8 +102,10 @@ citrixscan/
 └── citrix_release_cache.json       # generated automatically
 ```
 
-- `citrix_release_cache.json` is written automatically after successful release API queries. Updates are cumulative so releases already observed are retained if they later disappear from the API. If the API is unavailable, the existing cache is reused.
+- `citrix_release_cache.json` is refreshed at the start of every scan, even if the API is unavailable, by persisting all available API, cached, and manual entries. Updates are cumulative so releases already observed are retained if they later disappear from the API. The script directory must be writable for the cache to be saved; a write failure is reported at startup.
 - `citrix_document_history.json` is maintained manually. It supplements the API with replaced or withdrawn builds that are still present in the official NetScaler Document History. If this file is absent or invalid, API and cached releases are still used and the scanner records a diagnostic note.
+
+The startup banner prints the resolved cache path and catalog size. Informational commands such as `--help` and `--list-cves` do not start a target scan and do not refresh the catalog.
 
 Minimal Document History structure:
 
@@ -137,6 +141,8 @@ Regex-scans HTML, JavaScript, and XML responses for firmware-specific strings li
 
 Downloads the Endpoint Analysis client (`nsepa_setup.exe`) and scans the PE binary for embedded NetScaler firmware version strings. Includes strict validation to reject Windows build numbers (e.g., `11.0.20348.1`) that are present in the PE metadata but represent the Windows SDK version, not NetScaler firmware.
 
+When the HEAD response has binary-looking metadata, its `Last-Modified` header is also compared with nearby release dates. This is explicitly a `LOW`-confidence **fallback indicator**, not a firmware version or minimum version: EPA files can be replaced independently of an appliance upgrade. Header names are matched case-insensitively. The date alone never triggers EOL or CVE conclusions. `--no-deep` still allows this HEAD-only indicator while skipping executable downloads.
+
 ### 6-10. Additional Vectors
 
 Content-Length fingerprinting, ETag correlation, login page hash mapping, TLS certificate CN/SAN analysis, and plugin version filtering (to reject VPN client versions like `25.5.x.x` that appear in `pluginlist.xml`).
@@ -149,7 +155,7 @@ Some hardened appliances gate every resource path (including static files) behin
 VERSION UNKNOWN: Authenticate and run 'show ns version' to confirm patch status.
   → Fingerprint diagnostic: rdx_en.json.gz — GZIP valid but MTIME=0 (timestamp stripped)
   → Vulnerable config detected. ASSUME VULNERABLE until version confirmed.
-  → EPA binary downloadable. Download nsepa_setup.exe and check file properties.
+  → EPA path indicated by HEAD metadata. Rerun without --no-deep to verify and analyze the executable automatically.
   → Or use NITRO API with credentials: curl -k -u nsroot:pass https://<IP>/nitro/v1/config/nsversion
 ```
 
@@ -286,6 +292,8 @@ usage: citrixscan.py [-h] [-f FILE] [-p PORT] [-t TIMEOUT] [--threads N]
 | `--list-cves` | Print CVE database and exit | — |
 | `--version` | Print version and exit | — |
 
+The default `headers` scan still fingerprints the appliance, but does **not** assess CVEs. It labels that assessment "not run" and does not present zero findings or a LOW overall risk as proof the appliance is patched. Use `--modules cve` or `--modules all` for a CVE assessment.
+
 ---
 
 ## Architecture
@@ -295,6 +303,8 @@ Single Python file (~2,400 lines), zero external dependencies, stdlib only.
 ### Scan Phases
 
 ```
+Startup: refresh and persist the release catalog (API + cache + Document History)
+
 Phase 1: Standard Fingerprinting
   ├── 7 well-known NetScaler endpoints
   ├── Product detection (signal scoring)
@@ -304,8 +314,6 @@ Phase 1: Standard Fingerprinting
 Phase 2: Extended Probing
   ├── GZIP timestamp extraction (rdx_en.json.gz)
   ├── Unknown timestamp release inference
-  ├── Release API + cumulative local cache
-  ├── Manually maintained Document History data
   ├── NITRO API / nsversion endpoints
   ├── JavaScript/CSS resource probing
   └── Version pattern matching

@@ -635,6 +635,12 @@ def http_get(host, port, path, ctx, timeout=15, method="GET", max_body=8192):
         return None
 
 
+def _header_value(headers: dict, name: str) -> str:
+    """HTTP field names are case-insensitive, even after conversion to dict."""
+    return next((value for key, value in (headers or {}).items()
+                 if key.lower() == name.lower()), "")
+
+
 def http_get_binary(host, port, path, ctx, timeout=30, max_bytes=20*1024*1024):
     url = f"https://{host}:{port}{path}"
     req = urllib.request.Request(url, headers={
@@ -806,22 +812,32 @@ def extract_pe_version(data: bytes) -> Optional[str]:
     return None
 
 
+def _epa_head_looks_like_binary(head: dict) -> bool:
+    """Reject generic login pages before trusting EPA HEAD metadata."""
+    if not head or head.get("status") != 200:
+        return False
+    headers = head.get("headers", {})
+    content_type = _header_value(headers, "Content-Type").lower()
+    if "text/html" in content_type:
+        return False
+    disposition = _header_value(headers, "Content-Disposition").lower()
+    try:
+        size = int(_header_value(headers, "Content-Length") or "0")
+    except ValueError:
+        size = 0
+    return (
+        ".exe" in disposition
+        or "octet-stream" in content_type
+        or "application/x-msdownload" in content_type
+        or size >= 1024 * 1024
+    )
+
+
 def probe_epa_availability(host, port, ctx, timeout, verify_binary: bool) -> Optional[str]:
     """Return the first plausible EPA path, avoiding generic HTTP-200 pages."""
     for epa_path in EPA_PATHS:
         head = http_get(host, port, epa_path, ctx, timeout, method="HEAD")
         head_available = bool(head and head["status"] == 200)
-        headers = {
-            key.lower(): value
-            for key, value in (head.get("headers", {}) if head_available else {}).items()
-        }
-        content_type = headers.get("content-type", "").lower()
-        disposition = headers.get("content-disposition", "").lower()
-        try:
-            size = int(headers.get("content-length", "0"))
-        except ValueError:
-            size = 0
-
         if verify_binary:
             prefix = http_get_binary(host, port, epa_path, ctx, timeout, max_bytes=2)
             if prefix and prefix["status"] == 200 and prefix.get("data", b"")[:2] == b"MZ":
@@ -833,12 +849,7 @@ def probe_epa_availability(host, port, ctx, timeout, verify_binary: bool) -> Opt
 
         # With --no-deep, do not GET the executable. Require binary-looking
         # HEAD metadata instead of treating every generic 200 page as EPA.
-        if (
-            ".exe" in disposition
-            or "octet-stream" in content_type
-            or "application/x-msdownload" in content_type
-            or size >= 1024 * 1024
-        ):
+        if _epa_head_looks_like_binary(head):
             return epa_path
     return None
 
@@ -864,7 +875,7 @@ def extract_nitro_version(resp):
     if is_login_page(body):
         # Still check headers — version can leak there even when body is login page
         for hdr in ("X-NS-version", "Server", "Via", "X-Citrix-Version"):
-            val = resp.get("headers", {}).get(hdr, "")
+            val = _header_value(resp.get("headers", {}), hdr)
             if val:
                 m = re.search(r'NS(\d+\.\d+):\s*Build\s+(\d+\.\d+)', val)
                 if m:
@@ -912,7 +923,7 @@ def extract_nitro_version(resp):
 
     # Method 4: Check response headers for version leak
     for hdr in ("X-NS-version", "Server", "Via", "X-Citrix-Version"):
-        val = resp.get("headers", {}).get(hdr, "")
+        val = _header_value(resp.get("headers", {}), hdr)
         if val:
             m = re.search(r'NS(\d+\.\d+):\s*Build\s+(\d+\.\d+)', val)
             if m:
@@ -959,10 +970,12 @@ class ScanResult:
     mgmt_exposed: bool = False
     epa_available: bool = False
     deep_scan_enabled: bool = True
+    modules_run: list = field(default_factory=list)
     nitro_accessible: bool = False
     server_header: str = ""
     # CVE results
     cve_results: list = field(default_factory=list)
+    cve_assessed: bool = False
     critical_cves: int = 0
     high_cves: int = 0
     total_vulns: int = 0
@@ -999,7 +1012,7 @@ def detect_product(responses: list, tls_info: dict) -> bool:
             signals += 2
         if any(kw in lower for kw in ["citrix", "x-citrix", "nsc_"]):
             signals += 1
-        cookies = resp["headers"].get("Set-Cookie", "")
+        cookies = _header_value(resp["headers"], "Set-Cookie")
         if "NSC_" in cookies or "ns_vpn" in cookies.lower():
             signals += 2
     tls_combined = f"{tls_info.get('cn','')} {tls_info.get('san','')} {tls_info.get('issuer','')}".lower()
@@ -1078,8 +1091,8 @@ def detect_config(responses: list, paths_tried: dict) -> dict:
 #  Blog: https://blog.fox-it.com/2022/12/28/cve-2022-27510-cve-2022-27518-measuring-citrix-adc-gateway-version-adoption-on-the-internet/
 #
 #  The file /vpn/js/rdx/core/lang/rdx_en.json.gz contains a GZIP MTIME
-#  timestamp (bytes 4-8, little-endian) set during firmware compilation.
-#  This timestamp uniquely identifies the NetScaler build version.
+#  timestamp (bytes 4-8, little-endian). Known values can fingerprint a
+#  specific build; unknown MTIMEs may also reflect refreshed/reused resources.
 # ══════════════════════════════════════════════════════════════════════════════
 
 RDX_EN_STAMP_TO_VERSION = {
@@ -1166,9 +1179,8 @@ RDX_EN_STAMP_TO_VERSION = {
 }
 
 
-# Dynamic release lookup used only when the exact GZIP timestamp is not in the
-# hardcoded mapping above. The API is the backend used by the official
-# NetScaler "Release Updates" page. The separate document-history file is
+# Dynamic release catalog refreshed at scan startup. The API is the backend
+# used by the official NetScaler "Release Updates" page. The separate history is
 # intentionally maintained by hand because replaced builds can disappear from
 # that API.
 RELEASE_API_BASE = (
@@ -1181,8 +1193,6 @@ RELEASE_CACHE_FILE = os.path.join(
 DOCUMENT_HISTORY_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "citrix_document_history.json"
 )
-RELEASE_EXPECTED_LEAD_DAYS = 7
-
 _release_catalog = None
 _release_catalog_notes = []
 _release_catalog_lock = threading.Lock()
@@ -1234,10 +1244,10 @@ def _release_key(release: dict) -> tuple:
 
 
 def _write_release_cache(releases: List[dict]) -> None:
-    """Atomically persist the cumulative API catalog for later runs."""
+    """Atomically persist the cumulative API and document-history catalog."""
     payload = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
-        "source": RELEASE_API_BASE,
+        "source": "release-api + document-history + cumulative cache",
         "releases": sorted(
             releases,
             key=lambda item: (
@@ -1253,7 +1263,7 @@ def _write_release_cache(releases: List[dict]) -> None:
 
 
 def _fetch_and_cache_releases(timeout: int) -> Tuple[List[dict], List[str]]:
-    """Fetch current releases and merge them into the persistent cache."""
+    """Fetch current releases and merge them with the existing cache."""
     notes = []
     cached = _load_release_file(RELEASE_CACHE_FILE)
     cumulative = {_release_key(release): release for release in cached}
@@ -1262,12 +1272,16 @@ def _fetch_and_cache_releases(timeout: int) -> Tuple[List[dict], List[str]]:
         products = _release_api_get("/products", timeout=timeout)
         adc_product = next(
             product for product in products
-            if str(product.get("name", "")).lower() == "citrix adc"
+            if str(product.get("name", "")).lower().startswith(
+                ("citrix adc", "netscaler adc")
+            )
         )
         versions = _release_api_get(
             "/versions", {"productId": adc_product["id"]}, timeout
         )
-    except (StopIteration, KeyError, TypeError, ValueError, OSError,
+        if not isinstance(versions, list):
+            raise ValueError("invalid versions response")
+    except (StopIteration, KeyError, AttributeError, TypeError, ValueError, OSError,
             urllib.error.URLError, json.JSONDecodeError) as exc:
         notes.append(f"release API unavailable: {exc}")
         return list(cumulative.values()), notes
@@ -1279,25 +1293,34 @@ def _fetch_and_cache_releases(timeout: int) -> Tuple[List[dict], List[str]]:
             executor.submit(
                 _release_api_get, "/builds", {"versionId": version["id"]}, timeout
             ): version
-            for version in versions if version.get("id")
+            for version in versions if isinstance(version, dict) and version.get("id")
         }
         for future in as_completed(futures):
             version = futures[future]
             try:
                 build_results.append((version, future.result()))
-            except (KeyError, TypeError, ValueError, OSError,
+            except (KeyError, AttributeError, TypeError, ValueError, OSError,
                     urllib.error.URLError, json.JSONDecodeError) as exc:
                 notes.append(f"release API build query failed: {exc}")
 
     for version, builds in build_results:
+        if not isinstance(builds, list):
+            notes.append("release API returned invalid build data")
+            continue
         version_name = str(version.get("version", "")).strip()
         if not version_name:
             continue
         is_fips = version_name.upper().endswith(" FIPS")
-        branch = version_name[:-5].strip() if is_fips else version_name
+        branch_match = re.search(r'(?<!\d)(\d{2}\.\d)(?!\d)', version_name)
+        if not branch_match:
+            notes.append(f"release API returned unrecognized version: {version_name}")
+            continue
+        branch = branch_match.group(1)
         variant = "FIPS" if is_fips else "ADC"
 
         for build in builds:
+            if not isinstance(build, dict):
+                continue
             build_number = str(build.get("build_number", "")).strip()
             release_date = str(build.get("release_date", "")).strip()
             if not build_number or not release_date:
@@ -1311,12 +1334,7 @@ def _fetch_and_cache_releases(timeout: int) -> Tuple[List[dict], List[str]]:
             cumulative[_release_key(release)] = release
             fetched += 1
 
-    if fetched:
-        try:
-            _write_release_cache(list(cumulative.values()))
-        except OSError as exc:
-            notes.append(f"release cache could not be written: {exc}")
-    else:
+    if not fetched:
         notes.append("release API returned no builds")
 
     return list(cumulative.values()), notes
@@ -1347,19 +1365,25 @@ def _get_release_catalog(timeout: int) -> Tuple[List[dict], List[str]]:
         if not history_releases:
             notes.append(f"document history unavailable: {DOCUMENT_HISTORY_FILE}")
 
-        # Prefer the API timestamp where both sources contain the same build;
-        # the manual file fills gaps left by superseded API entries.
-        combined = {_release_key(release): release for release in history_releases}
-        for release in api_releases:
-            combined[_release_key(release)] = release
+        # Live API dates win; manually updated history wins over stale cached
+        # history entries when the live API no longer lists a build.
+        combined = {_release_key(release): release for release in api_releases}
+        for release in history_releases:
+            key = _release_key(release)
+            if key not in combined or combined[key].get("source") != "release-api":
+                combined[key] = release
 
         _release_catalog = list(combined.values())
+        try:
+            _write_release_cache(_release_catalog)
+        except OSError as exc:
+            notes.append(f"release cache could not be written: {exc}")
         _release_catalog_notes = notes
         return _release_catalog, _release_catalog_notes
 
 
 def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict], List[str]]:
-    """Return previous/best/next plausible releases for an unknown GZIP MTIME."""
+    """Rank nearby releases by date; an older build may reuse a newer GZIP file."""
     build_datetime = datetime.fromtimestamp(stamp, timezone.utc)
     build_date = build_datetime.date()
     catalog, notes = _get_release_catalog(timeout)
@@ -1370,8 +1394,6 @@ def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict],
         if not release_datetime:
             continue
         lead_days = (release_datetime.date() - build_date).days
-        if lead_days < 0:
-            continue
         possible.append({
             **release,
             "release_datetime": release_datetime,
@@ -1387,8 +1409,8 @@ def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict],
         item["full_version"],
     ))
     best = min(possible, key=lambda item: (
-        abs(item["lead_days"] - RELEASE_EXPECTED_LEAD_DAYS),
-        item["lead_days"],
+        abs(item["lead_days"]),
+        item["lead_days"] < 0,
         0 if item.get("variant", "ADC") == "ADC" else 1,
         item["full_version"],
     ))
@@ -1428,13 +1450,12 @@ def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict],
         )
         selected.append(("next", following))
 
-    # Deterministic heuristic likelihood centered on the observed seven-day
-    # median. These percentages rank the selected candidates; they are not a
-    # statistically calibrated guarantee.
-    weights = [
-        math.exp(-abs(item["lead_days"] - RELEASE_EXPECTED_LEAD_DAYS) / 7.0)
-        for _, item in selected
-    ]
+    # Relative proximity scores, not calibrated match probabilities. In
+    # particular, a GZIP file may be updated without a firmware upgrade.
+    distances = [abs(item["lead_days"]) for _, item in selected]
+    closest_distance = min(distances)
+    weights = [math.exp(-(distance - closest_distance) / 7.0)
+               for distance in distances]
     weight_total = sum(weights)
     probabilities = [round(weight / weight_total * 100.0, 1) for weight in weights]
     if probabilities:
@@ -1454,15 +1475,17 @@ def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict],
     return candidates, notes
 
 
-def _format_release_candidates(candidates: List[dict]) -> str:
+def _format_release_candidates(candidates: List[dict], show_scores: bool = True) -> str:
     formatted = []
     for candidate in candidates:
         variant = candidate.get("variant", "ADC")
         variant_suffix = f"/{variant}" if variant != "ADC" else ""
+        score = (f"{candidate['probability']:.1f}% relative score, "
+                 if show_scores else "")
         formatted.append(
             f"{candidate['position']}={candidate['full_version']}{variant_suffix} "
-            f"({candidate['probability']:.1f}%, release {candidate['release_date']}, "
-            f"+{candidate['lead_days']}d)"
+            f"({score}release {candidate['release_date']}, "
+            f"{candidate['lead_days']:+d}d)"
         )
     return "; ".join(formatted)
 
@@ -1483,9 +1506,11 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
     diagnostic = ""
     inferred_source = ""
     inferred_confidence = ""
+    inferred_has_candidates = False
 
     # 1. GZIP timestamp from resource files (Fox-IT technique)
-    # The GZIP MTIME field (bytes 4-8) contains the build compilation timestamp.
+    # The GZIP MTIME field (bytes 4-8) is a resource timestamp; unknown
+    # values alone do not establish the installed firmware build.
     # Credit: Fox-IT Security Research Team
     # Try multiple known GZIP resource paths — different builds serve from different locations
     gzip_paths = [
@@ -1521,9 +1546,12 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
                     dt_str = datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                     candidates, lookup_notes = infer_release_candidates(stamp, timeout)
                     candidate_text = _format_release_candidates(candidates)
-                    source = f"GZIP timestamp {gzip_path} (not in lookup table)"
+                    source = (f"GZIP MTIME fallback indicator {gzip_path} "
+                              f"(stamp={stamp}, {dt_str}; not in lookup table)")
                     if candidate_text:
-                        source += f"; heuristic candidates: {candidate_text}"
+                        source += f"; nearby releases: {candidate_text}"
+                    else:
+                        source += "; no dated release candidates available"
                     unknown_diagnostic = (
                         f"rdx_en stamp={stamp} dt={dt_str} — not in "
                         f"{len(RDX_EN_STAMP_TO_VERSION)}-entry lookup table"
@@ -1533,7 +1561,8 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
                     all_diags.append(unknown_diagnostic)
                     if not inferred_source:
                         inferred_source = source
-                        inferred_confidence = "MEDIUM" if candidates else "LOW"
+                        inferred_confidence = "LOW"
+                        inferred_has_candidates = bool(candidates)
                     # Inferred releases are not exact versions. Keep searching
                     # for an authoritative NITRO/header/body/EPA fingerprint.
                     continue
@@ -1572,7 +1601,7 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
         if not resp:
             continue
         for hdr in ("Server", "X-NS-version", "X-Citrix-Version", "Via", "X-NS-Build"):
-            val = resp["headers"].get(hdr, "")
+            val = _header_value(resp.get("headers", {}), hdr)
             if val:
                 for pat in HEADER_PATTERNS:
                     m = re.search(pat, val, re.IGNORECASE)
@@ -1580,39 +1609,44 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
                         if parse_netscaler_version(val):
                             return (val.strip(), f"HTTP header ({hdr})", "HIGH", diagnostic)
 
-    # EPA Last-Modified fingerprinting (non-intrusive, HEAD only)
-    if not inferred_source:
-        for epa_path in EPA_PATHS:
-            head = http_get(host, port, epa_path, ctx, timeout, method="HEAD")
-            if not head or head["status"] != 200:
-                continue
-            lm = head["headers"].get("Last-Modified")
-            if not lm:
-                continue
-            try:
-                from email.utils import parsedate_to_datetime
-                dt = parsedate_to_datetime(lm)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                stamp = int(dt.timestamp())
-            except Exception:
-                continue
-            if not (1500000000 < stamp < 2000000000):
-                continue
+    # EPA may be replaced independently of firmware. Its date is only context,
+    # never a minimum firmware version or a basis for CVE/EOL assessment.
+    for epa_path in EPA_PATHS:
+        head = http_get(host, port, epa_path, ctx, timeout, method="HEAD")
+        if not _epa_head_looks_like_binary(head):
+            continue
+        lm = _header_value(head.get("headers", {}), "Last-Modified")
+        if not lm:
+            continue
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(lm)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            stamp = int(dt.timestamp())
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not (1500000000 < stamp < 2000000000):
+            continue
 
-            candidates, notes = infer_release_candidates(stamp, timeout)
-            if candidates:
-                cand_text = _format_release_candidates(candidates)
-                # Mark as a minimum version with low/medium confidence
-                inferred_source = f"EPA Last-Modified fingerprint (min version; {epa_path})"
-                if cand_text:
-                    inferred_source += f"; plausible candidates: {cand_text}"
-                inferred_confidence = (
-                    "MEDIUM" if any(c["position"] == "best" for c in candidates) else "LOW"
-                )
-                diag = f"EPA Last-Modified -> {len(candidates)} candidates"
-                diagnostic = f"{diagnostic}; {diag}" if diagnostic else diag
-                break  # stop after first successful EPA
+        candidates, notes = infer_release_candidates(stamp, timeout)
+        date_text = dt.astimezone(timezone.utc).date().isoformat()
+        epa_source = (f"EPA file Last-Modified fallback indicator {epa_path} "
+                      f"(file date {date_text}; not a firmware build date)")
+        if candidates:
+            epa_source += ("; nearby releases by date only: "
+                           + _format_release_candidates(candidates, show_scores=False))
+        else:
+            epa_source += "; no dated release candidates available"
+        if not inferred_has_candidates:
+            inferred_source = epa_source
+            inferred_confidence = "LOW"
+            inferred_has_candidates = bool(candidates)
+        diag = f"EPA Last-Modified={lm} ({epa_path}; independent of firmware)"
+        if notes:
+            diag += f"; {'; '.join(notes)}"
+        diagnostic = f"{diagnostic}; {diag}" if diagnostic else diag
+        break
 
     # 3. Body firmware patterns (skip pluginlist.xml)
     for resp in all_resp:
@@ -1739,10 +1773,10 @@ def check_security_headers(responses: list) -> list:
     for resp in responses:
         if resp and resp["status"] == 200:
             for hdr, (msg, sev) in checked_headers.items():
-                if hdr not in resp["headers"]:
+                if not _header_value(resp["headers"], hdr):
                     findings.append({"check": hdr, "severity": sev, "detail": msg})
             # Check for server version disclosure
-            srv = resp["headers"].get("Server", "")
+            srv = _header_value(resp["headers"], "Server")
             if srv and any(kw in srv.lower() for kw in ["apache", "nginx", "netscaler", "ns-"]):
                 findings.append({"check": "Server Header Disclosure", "severity": "LOW",
                                  "detail": f"Server header reveals software: {srv}"})
@@ -2016,7 +2050,7 @@ def calculate_risk(result: ScanResult) -> str:
     if result.total_vulns > 0:
         return "MEDIUM"
     if result.is_netscaler and result.version_raw:
-        return "LOW"
+        return "LOW" if result.cve_assessed else "UNKNOWN"
     return "INFO"
 
 
@@ -2067,12 +2101,13 @@ def build_recommendations(result: ScanResult) -> list:
         if result.epa_available:
             if result.deep_scan_enabled:
                 recs.append(
-                    "  → EPA binary verified, but automatic analysis did not yield a usable "
-                    "NetScaler firmware version. See the fingerprint diagnostic; manual analysis may still help."
+                    "  → EPA executable detected, but automatic analysis found no confirmed "
+                    "firmware version. Its file date is only a fallback indicator."
                 )
             else:
                 recs.append(
-                    "  → EPA binary available. Rerun without --no-deep to download and parse it automatically."
+                    "  → EPA path indicated by HEAD metadata. Rerun without --no-deep "
+                    "to verify and analyze the executable automatically."
                 )
         recs.append("  → Or use NITRO API with credentials: curl -k -u nsroot:pass https://<IP>/nitro/v1/config/nsversion")
         if result.etag_values:
@@ -2095,6 +2130,7 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
         target=target, ip=target, port=port,
         timestamp=start_time.isoformat(),
         deep_scan_enabled=deep_scan,
+        modules_run=sorted(selected_modules),
     )
     ctx = create_ssl_context()
 
@@ -2137,8 +2173,8 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
         if resp:
             result.accessible_paths.append(f"{path} [{resp['status']}]")
             if not result.server_header:
-                result.server_header = resp["headers"].get("Server", "")
-            etag = resp["headers"].get("ETag", "")
+                result.server_header = _header_value(resp["headers"], "Server")
+            etag = _header_value(resp["headers"], "ETag")
             if etag:
                 result.etag_values.append(f"{path}: {etag}")
 
@@ -2160,7 +2196,7 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
         paths_tried[path] = resp
         if resp:
             result.accessible_paths.append(f"{path} [{resp['status']}]")
-            etag = resp["headers"].get("ETag", "")
+            etag = _header_value(resp["headers"], "ETag")
             if etag:
                 result.etag_values.append(f"{path}: {etag}")
             if "/nitro/v1/config/nsversion" in path and resp["status"] in (200, 401, 403):
@@ -2187,19 +2223,8 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
     result.version_confidence = ver_conf
     result.rdx_en_status = ver_diag
 
-    # If we only have an inferred minimum version, use its best candidate for display
-    if not ver_raw and ver_src:
-        m = re.search(r'best=([\d.]+-\d+\.\d+)', ver_src)
-        if m:
-            best_version = m.group(1)
-            result.version_display = best_version
-            # Do not set version_parsed – CVE checks remain disabled for inferred versions
-            parsed = parse_netscaler_version(best_version)
-            if parsed:
-                result.branch = f"{parsed[0]}.{parsed[1]}"
-                result.eol = result.branch in EOL_BRANCHES
-
-    if ver_raw or ver_src.startswith(("GZIP timestamp", "NITRO API", "/nsversion", "EPA ")):
+    # Date proximity is not a confirmed firmware version or EOL assessment.
+    if ver_raw or ver_src.startswith(("GZIP MTIME", "EPA file")):
         result.is_netscaler = True
 
     # Validate EPA availability. With deep scanning enabled, verify the PE magic
@@ -2210,7 +2235,8 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
         )
         if epa_path:
             result.epa_available = True
-            result.accessible_paths.append(f"{epa_path} [EPA verified]")
+            evidence = "EPA PE verified" if deep_scan else "EPA HEAD metadata"
+            result.accessible_paths.append(f"{epa_path} [{evidence}]")
 
     if ver_raw:
         result.version_parsed = parse_netscaler_version(ver_raw)
@@ -2248,6 +2274,7 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
     # ── CVE Assessment ──
     if "cve" in selected_modules:
         if result.version_parsed:
+            result.cve_assessed = True
             for cve in CVE_DATABASE:
                 res = check_cve_applicability(result.version_parsed, config, cve)
                 res["cvss"] = cve.cvss
@@ -2314,9 +2341,12 @@ def print_result(r: ScanResult, verbose: bool = False):
         return
 
     print(f"  Version    : {r.version_display or 'UNKNOWN'}", end="")
-    if r.version_source:
+    if r.version_raw and r.version_source:
         print(f"  (via {r.version_source}, {r.version_confidence})", end="")
     print()
+    if not r.version_raw and r.version_source:
+        print(f"  Fallback indicator (not a firmware version, {r.version_confidence}): "
+              f"{r.version_source}")
     if r.branch:
         eol_tag = f" \033[91m[EOL]{R}" if r.eol else ""
         print(f"  Branch     : {r.branch}{eol_tag}")
@@ -2358,8 +2388,12 @@ def print_result(r: ScanResult, verbose: bool = False):
                   f"{cv['title'][:45]}{cfg}{itw}{poc}{conf_met}")
             if cv.get("fixed_version"):
                 print(f"      → Fix: {cv['fixed_version']}  ({cv.get('advisory','')})")
-    elif r.version_parsed:
+    elif r.cve_assessed:
         print(f"\n  {B}Vulnerabilities:{R} \033[92mNone found for {r.version_display}{R}")
+    elif r.version_parsed:
+        print(f"\n  CVE assessment: not run (enable --modules cve or all)")
+    elif "cve" in r.modules_run:
+        print(f"\n  CVE assessment: unavailable (no confirmed firmware version)")
 
     # IoCs
     if r.ioc_findings:
@@ -2417,6 +2451,7 @@ def print_summary(results: list):
     total_cves = sum(r.total_vulns for r in results)
     itw = sum(r.exploited_itw_vulns for r in results)
     eol_count = sum(1 for r in results if r.eol)
+    cve_assessed = sum(1 for r in results if r.cve_assessed)
 
     print(f"\n{'═'*80}")
     print(f"{B} EXECUTIVE SUMMARY{R}")
@@ -2429,7 +2464,7 @@ def print_summary(results: list):
     print(f"\n  {COLORS['CRITICAL']}CRITICAL{R}  : {crit}")
     print(f"  {COLORS['HIGH']}HIGH{R}      : {high}")
     print(f"  {COLORS['MEDIUM']}MEDIUM{R}    : {med}")
-    print(f"\n  Total CVEs Found   : {total_cves}")
+    print(f"\n  Total CVEs Found   : {total_cves} ({cve_assessed} targets assessed)")
     print(f"  Exploited-ITW CVEs : {itw}")
     print(f"  IoC Detections     : {ioc}")
 
@@ -2452,7 +2487,7 @@ def export_json(results: list, filepath: str):
                 "tool": "CitrixScan", "version": __version__, "author": __author__,
                 "scan_date": datetime.now(timezone.utc).isoformat(),
                 "cve_database_size": len(CVE_DATABASE),
-                "modules": "version, cve, ioc, misconfig, tls, headers",
+                "modules": sorted({module for r in results for module in r.modules_run}),
             },
             "results": export,
             "summary": {
@@ -2470,7 +2505,7 @@ def export_json(results: list, filepath: str):
 def export_csv(results: list, filepath: str):
     fields = [
         "target", "ip", "port", "reachable", "is_netscaler", "version_display",
-        "branch", "eol", "version_source", "version_confidence",
+        "branch", "eol", "version_source", "version_confidence", "cve_assessed",
         "saml_idp_detected", "oauth_idp_detected", "gateway_detected", "aaa_detected", "mgmt_exposed",
         "tls_protocol", "tls_cipher", "tls_bits",
         "total_vulns", "critical_cves", "high_cves", "exploited_itw_vulns",
@@ -2512,11 +2547,18 @@ def export_markdown(results: list, filepath: str):
             f.write(f"### {risk_emoji} {r.target}:{r.port}\n\n")
             f.write(f"- **Risk:** {r.risk_rating}\n")
             f.write(f"- **Version:** {r.version_display or 'Unknown'}\n")
+            if not r.version_raw and r.version_source:
+                f.write(f"- **Fallback indicator (not a firmware version):** {r.version_source}\n")
             f.write(f"- **Branch:** {r.branch or 'N/A'} {'(EOL)' if r.eol else ''}\n")
             f.write(f"- **SAML IDP:** {'Yes' if r.saml_idp_detected else 'No'}\n")
             f.write(f"- **OAuth IdP:** {'Yes' if r.oauth_idp_detected else 'No'}\n")
             f.write(f"- **Gateway:** {'Yes' if r.gateway_detected else 'No'}\n")
-            f.write(f"- **CVEs:** {r.total_vulns} ({r.critical_cves} critical, {r.exploited_itw_vulns} exploited-ITW)\n\n")
+            if r.cve_assessed:
+                f.write(f"- **CVEs:** {r.total_vulns} ({r.critical_cves} critical, {r.exploited_itw_vulns} exploited-ITW)\n\n")
+            elif "cve" in r.modules_run:
+                f.write("- **CVEs:** Cannot assess without a confirmed firmware version\n\n")
+            else:
+                f.write("- **CVEs:** Not assessed (enable --modules cve or all)\n\n")
 
             if r.cve_results:
                 f.write("| CVE | CVSS | Severity | Title | Fix |\n|---|---|---|---|---|\n")
@@ -2611,6 +2653,12 @@ def main():
     print(f"  Targets: {len(targets)} │ Port: {args.port} │ Threads: {args.threads}")
     print(f"  Modules: {','.join(sorted(selected_modules))} │ CVE DB: {len(CVE_DATABASE)} entries")
     print(f"  Started: {datetime.now(timezone.utc).isoformat()}")
+    # Refresh and persist once at startup, even when no target exposes GZIP/EPA
+    # timestamps and regardless of which assessment modules were selected.
+    releases, release_notes = _get_release_catalog(args.timeout)
+    print(f"  Release catalog: {len(releases)} builds │ cache: {RELEASE_CACHE_FILE}")
+    for note in release_notes:
+        print(f"[!] {note}", file=sys.stderr)
     print(f"{'─'*80}")
 
     results = []
