@@ -57,6 +57,7 @@ import struct
 import sys
 import os
 import threading
+import textwrap
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -947,6 +948,8 @@ class ScanResult:
     version_raw: str = ""
     version_parsed: Optional[tuple] = None
     version_display: str = ""
+    fallback_version: str = ""
+    version_status: str = "UNKNOWN"
     version_source: str = ""
     version_confidence: str = ""
     rdx_en_status: str = ""  # Diagnostic: what rdx_en.json.gz returned
@@ -1488,6 +1491,14 @@ def _format_release_candidates(candidates: List[dict], show_scores: bool = True)
             f"{candidate['lead_days']:+d}d)"
         )
     return "; ".join(formatted)
+
+
+def _best_fallback_version(source: str) -> str:
+    """Extract the display-only best match, preserving a FIPS variant suffix."""
+    match = re.search(
+        r'\bbest=(\d{2}\.\d+-\d+\.\d+(?:/[A-Za-z0-9_-]+)?)(?=\s|;|$)', source
+    )
+    return match.group(1) if match else ""
 
 
 def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
@@ -2093,7 +2104,13 @@ def build_recommendations(result: ScanResult) -> list:
         recs.append("  kill pcoipConnection -all && clear lb persistentSessions")
         recs.append("FORENSICS: Snapshot appliance BEFORE patching for investigation.")
     if result.is_netscaler and not result.version_raw:
-        recs.append("VERSION UNKNOWN: Authenticate and run 'show ns version' to confirm patch status.")
+        if result.fallback_version:
+            recs.append(
+                "VERSION UNCONFIRMED: The displayed fallback is a date-based candidate, "
+                "not verified firmware. Authenticate and run 'show ns version' to confirm patch status."
+            )
+        else:
+            recs.append("VERSION UNKNOWN: Authenticate and run 'show ns version' to confirm patch status.")
         if result.rdx_en_status:
             recs.append(f"  → Fingerprint diagnostic: {result.rdx_en_status}")
         if result.saml_idp_detected or result.gateway_detected:
@@ -2223,7 +2240,14 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
     result.version_confidence = ver_conf
     result.rdx_en_status = ver_diag
 
-    # Date proximity is not a confirmed firmware version or EOL assessment.
+    # Show the best date-only match, without promoting it to a confirmed
+    # firmware version for CVE, branch, EOL, or risk calculations.
+    if not ver_raw and ver_src:
+        result.fallback_version = _best_fallback_version(ver_src)
+        if result.fallback_version:
+            result.version_display = result.fallback_version
+            result.version_status = "FALLBACK-LOW-CONFIDENCE"
+
     if ver_raw or ver_src.startswith(("GZIP MTIME", "EPA file")):
         result.is_netscaler = True
 
@@ -2242,6 +2266,7 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
         result.version_parsed = parse_netscaler_version(ver_raw)
     if result.version_parsed:
         result.version_display = format_version(result.version_parsed)
+        result.version_status = "CONFIRMED"
         result.branch = f"{result.version_parsed[0]}.{result.version_parsed[1]}"
         result.eol = result.branch in EOL_BRANCHES
 
@@ -2324,6 +2349,29 @@ R = "\033[0m"
 B = "\033[1m"
 
 
+def _print_fallback_indicator(source: str) -> None:
+    """Keep the full provenance in reports, but condense it on the console."""
+    if source.startswith("GZIP MTIME"):
+        kind = "GZIP MTIME"
+    elif source.startswith("EPA file Last-Modified"):
+        kind = "EPA file Last-Modified"
+    else:
+        print(textwrap.fill(source, width=105,
+                            initial_indent="  Fallback indicator: ",
+                            subsequent_indent="    "))
+        return
+
+    date_match = re.search(r'\d{4}-\d{2}-\d{2}', source)
+    date = f" {date_match.group(0)}" if date_match else ""
+    print(f"  Fallback indicator: {kind}{date} (date proximity only; firmware unverified)")
+    candidates = re.findall(r'(?:previous|best|next)=[^;]+', source)
+    for candidate in candidates:
+        print(textwrap.fill(candidate.strip(), width=105,
+                            initial_indent="    ", subsequent_indent="      "))
+    if not candidates:
+        print("    No dated release candidate available.")
+
+
 def print_result(r: ScanResult, verbose: bool = False):
     c = COLORS.get(r.risk_rating, "")
     print(f"\n{'═'*80}")
@@ -2341,12 +2389,13 @@ def print_result(r: ScanResult, verbose: bool = False):
         return
 
     print(f"  Version    : {r.version_display or 'UNKNOWN'}", end="")
-    if r.version_raw and r.version_source:
+    if r.fallback_version:
+        print(" FALLBACK-LOW-CONFIDENCE", end="")
+    elif r.version_raw and r.version_source:
         print(f"  (via {r.version_source}, {r.version_confidence})", end="")
     print()
     if not r.version_raw and r.version_source:
-        print(f"  Fallback indicator (not a firmware version, {r.version_confidence}): "
-              f"{r.version_source}")
+        _print_fallback_indicator(r.version_source)
     if r.branch:
         eol_tag = f" \033[91m[EOL]{R}" if r.eol else ""
         print(f"  Branch     : {r.branch}{eol_tag}")
@@ -2459,7 +2508,7 @@ def print_summary(results: list):
     print(f"  Targets Scanned    : {total}")
     print(f"  Reachable          : {reachable}")
     print(f"  NetScaler Detected : {ns}")
-    print(f"  Version Identified : {ver}")
+    print(f"  Version Confirmed  : {ver}")
     print(f"  EOL Software       : {eol_count}")
     print(f"\n  {COLORS['CRITICAL']}CRITICAL{R}  : {crit}")
     print(f"  {COLORS['HIGH']}HIGH{R}      : {high}")
@@ -2505,7 +2554,8 @@ def export_json(results: list, filepath: str):
 def export_csv(results: list, filepath: str):
     fields = [
         "target", "ip", "port", "reachable", "is_netscaler", "version_display",
-        "branch", "eol", "version_source", "version_confidence", "cve_assessed",
+        "fallback_version", "version_status", "branch", "eol", "version_source",
+        "version_confidence", "cve_assessed",
         "saml_idp_detected", "oauth_idp_detected", "gateway_detected", "aaa_detected", "mgmt_exposed",
         "tls_protocol", "tls_cipher", "tls_bits",
         "total_vulns", "critical_cves", "high_cves", "exploited_itw_vulns",
@@ -2546,7 +2596,8 @@ def export_markdown(results: list, filepath: str):
             risk_emoji = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}.get(r.risk_rating, "⚪")
             f.write(f"### {risk_emoji} {r.target}:{r.port}\n\n")
             f.write(f"- **Risk:** {r.risk_rating}\n")
-            f.write(f"- **Version:** {r.version_display or 'Unknown'}\n")
+            version_label = (f" {r.version_status}" if r.fallback_version else "")
+            f.write(f"- **Version:** {r.version_display or 'Unknown'}{version_label}\n")
             if not r.version_raw and r.version_source:
                 f.write(f"- **Fallback indicator (not a firmware version):** {r.version_source}\n")
             f.write(f"- **Branch:** {r.branch or 'N/A'} {'(EOL)' if r.eol else ''}\n")

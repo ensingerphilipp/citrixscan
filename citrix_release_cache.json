@@ -1,0 +1,534 @@
+{
+  "releases": [
+    {
+      "full_version": "13.1-52.19",
+      "release_date": "2024-04-05T05:05:01.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-48.47",
+      "release_date": "2024-04-05T05:11:57.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-45.64",
+      "release_date": "2024-04-05T05:12:37.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-42.47",
+      "release_date": "2024-04-05T05:13:15.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-37.38",
+      "release_date": "2024-04-05T05:14:22.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-27.59",
+      "release_date": "2024-04-05T05:17:14.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-24.38",
+      "release_date": "2024-04-05T05:18:05.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-21.50",
+      "release_date": "2024-04-05T05:18:44.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-17.42",
+      "release_date": "2024-04-05T05:19:32.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-12.51",
+      "release_date": "2024-04-05T05:20:15.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-9.60",
+      "release_date": "2024-04-05T05:21:26.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-4.44",
+      "release_date": "2024-04-05T05:23:39.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-91.13",
+      "release_date": "2024-04-10T03:56:25.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-90.12",
+      "release_date": "2024-04-10T03:57:04.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-89.7",
+      "release_date": "2024-04-10T03:57:46.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-87.9",
+      "release_date": "2024-04-10T04:00:08.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-86.17",
+      "release_date": "2024-04-10T04:02:53.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-85.19",
+      "release_date": "2024-04-10T04:03:46.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-84.11",
+      "release_date": "2024-04-10T04:04:27.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-83.29",
+      "release_date": "2024-04-10T04:05:28.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-82.45",
+      "release_date": "2024-04-10T04:06:20.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-79.64",
+      "release_date": "2024-04-10T04:07:26.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-76.31",
+      "release_date": "2024-04-10T04:09:22.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-71.44",
+      "release_date": "2024-04-10T04:10:28.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-67.43",
+      "release_date": "2024-04-10T04:11:19.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-64.35",
+      "release_date": "2024-04-10T04:12:06.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-61.48",
+      "release_date": "2024-04-10T04:12:52.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-58.32",
+      "release_date": "2024-04-10T04:13:35.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-52.24",
+      "release_date": "2024-04-10T04:16:29.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-47.24",
+      "release_date": "2024-04-10T04:17:27.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-41.28",
+      "release_date": "2024-04-10T04:18:16.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-88.16",
+      "release_date": "2024-04-10T05:23:07.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-50.23",
+      "release_date": "2024-04-24T05:27:01.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-33.54",
+      "release_date": "2024-05-20T08:18:58.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-30.52",
+      "release_date": "2024-05-20T08:26:47.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-4.42",
+      "release_date": "2024-06-20T10:35:40.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.0-92.31",
+      "release_date": "2024-07-09T14:09:30.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-25.56",
+      "release_date": "2024-08-28T10:44:53.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-17.38",
+      "release_date": "2024-08-29T06:44:26.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-8.50",
+      "release_date": "2024-08-29T06:45:27.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-21.57",
+      "release_date": "2024-09-04T10:36:23.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-51.15",
+      "release_date": "2024-09-10T15:23:09.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-12.35",
+      "release_date": "2024-09-10T15:24:55.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-53.24",
+      "release_date": "2024-11-07T10:30:59.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-29.72",
+      "release_date": "2024-11-13T10:34:02.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-54.29",
+      "release_date": "2024-11-14T06:01:30.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-49.15",
+      "release_date": "2024-12-03T08:29:21.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-34.42",
+      "release_date": "2024-12-03T10:50:34.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-56.18",
+      "release_date": "2024-12-03T10:53:50.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-55.34",
+      "release_date": "2024-12-03T10:55:51.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-57.26",
+      "release_date": "2025-02-04T13:30:39.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-38.53",
+      "release_date": "2025-02-05T05:29:42.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-43.56",
+      "release_date": "2025-06-17T10:56:09.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-58.32",
+      "release_date": "2025-06-17T13:30:37.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-47.48",
+      "release_date": "2025-08-26T10:22:15.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-59.22",
+      "release_date": "2025-08-26T10:55:27.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-60.26",
+      "release_date": "2025-09-08",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-51.72",
+      "release_date": "2025-09-08",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-60.29",
+      "release_date": "2025-09-29",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-51.80",
+      "release_date": "2025-09-29T10:19:11.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-56.71",
+      "release_date": "2025-10-24",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-60.32",
+      "release_date": "2025-11-11T03:57:46.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-56.74",
+      "release_date": "2025-11-11T04:55:24.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-61.23",
+      "release_date": "2025-11-13",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-37.255",
+      "release_date": "2025-12-09",
+      "source": "document-history",
+      "variant": "FIPS"
+    },
+    {
+      "full_version": "14.1-60.52",
+      "release_date": "2025-12-09",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-61.25",
+      "release_date": "2025-12-09T14:14:12.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-60.57",
+      "release_date": "2026-01-20",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-61.26",
+      "release_date": "2026-01-20T12:08:36.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-62.21",
+      "release_date": "2026-03-06",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-66.59",
+      "release_date": "2026-03-23T08:56:53.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-62.23",
+      "release_date": "2026-03-23T09:36:14.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-60.58",
+      "release_date": "2026-03-24T08:19:17.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-66.68",
+      "release_date": "2026-05-06T08:37:30.000Z",
+      "source": "release-api",
+      "variant": "FIPS"
+    },
+    {
+      "full_version": "13.1-63.16",
+      "release_date": "2026-05-08",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-72.57",
+      "release_date": "2026-05-27",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-63.18",
+      "release_date": "2026-06-30",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-72.61",
+      "release_date": "2026-06-30T10:38:47.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-72.61",
+      "release_date": "2026-06-30T12:26:40.000Z",
+      "source": "release-api",
+      "variant": "FIPS"
+    },
+    {
+      "full_version": "13.1-63.19",
+      "release_date": "2026-07-17",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-37.272",
+      "release_date": "2026-07-21T11:31:33.000Z",
+      "source": "release-api",
+      "variant": "FIPS"
+    },
+    {
+      "full_version": "14.1-73.30",
+      "release_date": "2026-07-30",
+      "source": "document-history",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-37.268",
+      "release_date": "2026-08-14T08:45:28.000Z",
+      "source": "release-api",
+      "variant": "FIPS"
+    },
+    {
+      "full_version": "14.1-73.33",
+      "release_date": "2026-08-19T10:26:32.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-63.21",
+      "release_date": "2026-08-19T11:01:04.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-37.277",
+      "release_date": "2026-08-19T11:52:19.000Z",
+      "source": "release-api",
+      "variant": "FIPS"
+    },
+    {
+      "full_version": "14.1-73.33",
+      "release_date": "2026-08-19T13:16:59.000Z",
+      "source": "release-api",
+      "variant": "FIPS"
+    },
+    {
+      "full_version": "13.1-64.22",
+      "release_date": "2026-09-03T06:00:11.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    }
+  ],
+  "source": "release-api + document-history + cumulative cache",
+  "updated_at": "2026-09-24T12:58:54.226355+00:00"
+}
