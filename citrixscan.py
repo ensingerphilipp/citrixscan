@@ -9,7 +9,7 @@
 ║  Authors  : Philipp Ensinger & NetGuard 24/7 LLC (netguard24-7.com)          ║
 ║                                                  & Open Source Contributors  ║
 ║  License : MIT                                                               ║
-║  Version : 1.2                                                               ║
+║  Version : 1.2.1                                                               ║
 ║  Date    : 2026-09-22                                                        ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -41,7 +41,7 @@ DISCLAIMER:
   no liability for misuse.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 __author__ = "Philipp Ensinger & NetGuard 24/7 LLC & Open Source Contributors"
 __license__ = "MIT"
 
@@ -1580,6 +1580,40 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
                         if parse_netscaler_version(val):
                             return (val.strip(), f"HTTP header ({hdr})", "HIGH", diagnostic)
 
+    # EPA Last-Modified fingerprinting (non-intrusive, HEAD only)
+    if not inferred_source:
+        for epa_path in EPA_PATHS:
+            head = http_get(host, port, epa_path, ctx, timeout, method="HEAD")
+            if not head or head["status"] != 200:
+                continue
+            lm = head["headers"].get("Last-Modified")
+            if not lm:
+                continue
+            try:
+                from email.utils import parsedate_to_datetime
+                dt = parsedate_to_datetime(lm)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                stamp = int(dt.timestamp())
+            except Exception:
+                continue
+            if not (1500000000 < stamp < 2000000000):
+                continue
+
+            candidates, notes = infer_release_candidates(stamp, timeout)
+            if candidates:
+                cand_text = _format_release_candidates(candidates)
+                # Mark as a minimum version with low/medium confidence
+                inferred_source = f"EPA Last-Modified fingerprint (min version; {epa_path})"
+                if cand_text:
+                    inferred_source += f"; plausible candidates: {cand_text}"
+                inferred_confidence = (
+                    "MEDIUM" if any(c["position"] == "best" for c in candidates) else "LOW"
+                )
+                diag = f"EPA Last-Modified -> {len(candidates)} candidates"
+                diagnostic = f"{diagnostic}; {diag}" if diagnostic else diag
+                break  # stop after first successful EPA
+
     # 3. Body firmware patterns (skip pluginlist.xml)
     for resp in all_resp:
         if not resp:
@@ -2152,6 +2186,18 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
     result.version_source = ver_src
     result.version_confidence = ver_conf
     result.rdx_en_status = ver_diag
+
+    # If we only have an inferred minimum version, use its best candidate for display
+    if not ver_raw and ver_src:
+        m = re.search(r'best=([\d.]+-\d+\.\d+)', ver_src)
+        if m:
+            best_version = m.group(1)
+            result.version_display = best_version
+            # Do not set version_parsed – CVE checks remain disabled for inferred versions
+            parsed = parse_netscaler_version(best_version)
+            if parsed:
+                result.branch = f"{parsed[0]}.{parsed[1]}"
+                result.eol = result.branch in EOL_BRANCHES
 
     if ver_raw or ver_src.startswith(("GZIP timestamp", "NITRO API", "/nsversion", "EPA ")):
         result.is_netscaler = True
