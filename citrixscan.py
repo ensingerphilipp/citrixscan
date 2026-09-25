@@ -644,10 +644,13 @@ def _header_value(headers: dict, name: str) -> str:
 
 def http_get_binary(host, port, path, ctx, timeout=30, max_bytes=20*1024*1024):
     url = f"https://{host}:{port}{path}"
-    req = urllib.request.Request(url, headers={
+    headers = {
         "User-Agent": "CitrixScan/1.2 (Security Assessment)",
         "Accept": "application/octet-stream,*/*", "Connection": "close",
-    })
+    }
+    if max_bytes == 2:
+        headers["Range"] = "bytes=0-1"
+    req = urllib.request.Request(url, headers=headers)
     try:
         handler = urllib.request.HTTPSHandler(context=ctx)
         opener = urllib.request.build_opener(handler)
@@ -662,6 +665,11 @@ def http_get_binary(host, port, path, ctx, timeout=30, max_bytes=20*1024*1024):
             "size": len(data),
             "truncated": truncated,
         }
+    except urllib.error.HTTPError as exc:
+        # A missing resource is different from a failed connection. Preserve
+        # 429/5xx responses so batch scans can retry temporary failures.
+        return {"status": exc.code, "headers": dict(exc.headers or {}),
+                "data": b"", "size": 0, "truncated": False}
     except Exception:
         return None
 
@@ -834,24 +842,35 @@ def _epa_head_looks_like_binary(head: dict) -> bool:
     )
 
 
+def _epa_modified_date(value: str) -> Optional[datetime]:
+    """Accept only valid, plausible HTTP Last-Modified dates."""
+    if not value:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=timezone.utc)
+        return date if 1500000000 < date.timestamp() < 2000000000 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def probe_epa_availability(host, port, ctx, timeout, verify_binary: bool) -> Optional[str]:
-    """Return the first plausible EPA path, avoiding generic HTTP-200 pages."""
+    """Return an EPA path confirmed by HEAD metadata or a bounded GET prefix."""
     for epa_path in EPA_PATHS:
         head = http_get(host, port, epa_path, ctx, timeout, method="HEAD")
-        head_available = bool(head and head["status"] == 200)
-        if verify_binary:
-            prefix = http_get_binary(host, port, epa_path, ctx, timeout, max_bytes=2)
-            if prefix and prefix["status"] == 200 and prefix.get("data", b"")[:2] == b"MZ":
-                return epa_path
-            continue
-
-        if not head_available:
-            continue
-
-        # With --no-deep, do not GET the executable. Require binary-looking
-        # HEAD metadata instead of treating every generic 200 page as EPA.
-        if _epa_head_looks_like_binary(head):
+        # If HEAD is unhelpful, verify MZ using a small GET. If Range is
+        # redirected, try a plain GET and stop reading after four bytes.
+        if not verify_binary and _epa_head_looks_like_binary(head):
             return epa_path
+        for limit in (2, 3):
+            prefix = http_get_binary(host, port, epa_path, ctx, timeout, max_bytes=limit)
+            if prefix and prefix.get("status") in (200, 206) and prefix.get("data", b"")[:2] == b"MZ":
+                return epa_path
+            if (prefix is None or prefix.get("status") in (404, 429)
+                    or prefix.get("status", 0) >= 500):
+                break
     return None
 
 
@@ -1624,26 +1643,42 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
     # never a minimum firmware version or a basis for CVE/EOL assessment.
     for epa_path in EPA_PATHS:
         head = http_get(host, port, epa_path, ctx, timeout, method="HEAD")
-        if not _epa_head_looks_like_binary(head):
-            continue
-        lm = _header_value(head.get("headers", {}), "Last-Modified")
-        if not lm:
-            continue
-        try:
-            from email.utils import parsedate_to_datetime
-            dt = parsedate_to_datetime(lm)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            stamp = int(dt.timestamp())
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if not (1500000000 < stamp < 2000000000):
+        if head is None:
+            diagnostic += f"; EPA HEAD {epa_path} — connection failed"
+        elif head.get("status") == 429 or 500 <= head.get("status", 0) <= 599:
+            diagnostic += f"; EPA HEAD {epa_path} — HTTP {head['status']}"
+        lm = (_header_value(head.get("headers", {}), "Last-Modified")
+              if _epa_head_looks_like_binary(head) else "")
+        dt = _epa_modified_date(lm)
+        method = "HEAD"
+        if dt is None:
+            # HEAD can be rejected or omit Last-Modified while GET succeeds.
+            # A server may also redirect ranged requests while an ordinary
+            # GET serves the executable. Both reads stop after a few bytes.
+            for limit in (2, 3):
+                prefix = http_get_binary(host, port, epa_path, ctx, timeout, max_bytes=limit)
+                if prefix is None:
+                    diagnostic += f"; EPA GET {epa_path} — connection failed"
+                    break
+                if prefix.get("status") == 429 or 500 <= prefix.get("status", 0) <= 599:
+                    diagnostic += f"; EPA GET {epa_path} — HTTP {prefix['status']}"
+                    break
+                if prefix.get("status") in (200, 206) and prefix.get("data", b"")[:2] == b"MZ":
+                    lm = _header_value(prefix.get("headers", {}), "Last-Modified")
+                    dt = _epa_modified_date(lm)
+                    if dt:
+                        method = "GET"
+                        break
+                if limit == 3 or prefix.get("status") == 404:
+                    break
+        if dt is None:
             continue
 
+        stamp = int(dt.timestamp())
         candidates, notes = infer_release_candidates(stamp, timeout)
         date_text = dt.astimezone(timezone.utc).date().isoformat()
         epa_source = (f"EPA file Last-Modified fallback indicator {epa_path} "
-                      f"(file date {date_text}; not a firmware build date)")
+                      f"(file date {date_text}, via {method}; not a firmware build date)")
         if candidates:
             epa_source += ("; nearby releases by date only: "
                            + _format_release_candidates(candidates, show_scores=False))
@@ -1653,7 +1688,7 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
             inferred_source = epa_source
             inferred_confidence = "LOW"
             inferred_has_candidates = bool(candidates)
-        diag = f"EPA Last-Modified={lm} ({epa_path}; independent of firmware)"
+        diag = f"EPA Last-Modified={lm} via {method} ({epa_path}; independent of firmware)"
         if notes:
             diag += f"; {'; '.join(notes)}"
         diagnostic = f"{diagnostic}; {diag}" if diagnostic else diag
@@ -2259,7 +2294,7 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
         )
         if epa_path:
             result.epa_available = True
-            evidence = "EPA PE verified" if deep_scan else "EPA HEAD metadata"
+            evidence = "EPA PE verified" if deep_scan else "EPA HEAD or MZ prefix"
             result.accessible_paths.append(f"{epa_path} [{evidence}]")
 
     if ver_raw:
@@ -2337,6 +2372,15 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
     result.scan_duration = (datetime.now(timezone.utc) - start_time).total_seconds()
 
     return result
+
+
+def _version_probes_failed_transiently(result: ScanResult) -> bool:
+    """Retry unconfirmed versions after a connection or temporary HTTP failure."""
+    if not result.reachable or not result.is_netscaler or result.version_raw:
+        return False
+    diagnostic = result.rdx_en_status
+    return ("— connection failed" in diagnostic
+            or bool(re.search(r'\bHTTP (?:429|5\d\d)\b', diagnostic)))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2659,7 +2703,7 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--modules", default="headers",
                         help="Scan modules: all, cve, ioc, misconfig, tls, headers (comma-separated)")
-    parser.add_argument("--no-deep", action="store_true", help="Skip EPA binary download")
+    parser.add_argument("--no-deep", action="store_true", help="Skip full EPA binary download")
     parser.add_argument("--list-cves", action="store_true", help="List all CVEs in database and exit")
     parser.add_argument("--version", action="version", version=f"CitrixScan v{__version__}")
 
@@ -2713,6 +2757,7 @@ def main():
     print(f"{'─'*80}")
 
     results = []
+    retry_results = []
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         futures = {
             executor.submit(
@@ -2723,10 +2768,31 @@ def main():
         for future in as_completed(futures):
             try:
                 result = future.result()
-                results.append(result)
-                print_result(result, verbose=args.verbose)
+                if args.threads > 1 and len(targets) > 1 and _version_probes_failed_transiently(result):
+                    retry_results.append(result)
+                    print(f"[~] {futures[future]}: version request failed; retrying after concurrent scans finish")
+                else:
+                    results.append(result)
+                    print_result(result, verbose=args.verbose)
             except Exception as e:
                 print(f"[!] Error scanning {futures[future]}: {e}", file=sys.stderr)
+
+    # A busy gateway may drop fingerprint requests while several targets are
+    # scanned at once. Retry only transiently failed, reachable NetScalers,
+    # one at a time, and keep each final result in all report formats.
+    for initial in retry_results:
+        try:
+            retried = scan_target(
+                initial.target, args.port, args.timeout, selected_modules, not args.no_deep
+            )
+            result = (retried if retried.reachable and retried.is_netscaler
+                      and (retried.version_display or not initial.version_display)
+                      else initial)
+        except Exception as e:
+            print(f"[!] Error retrying {initial.target}: {e}", file=sys.stderr)
+            result = initial
+        results.append(result)
+        print_result(result, verbose=args.verbose)
 
     risk_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4, "UNKNOWN": 5}
     results.sort(key=lambda r: risk_order.get(r.risk_rating, 5))
