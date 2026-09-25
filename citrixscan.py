@@ -968,6 +968,8 @@ class ScanResult:
     version_parsed: Optional[tuple] = None
     version_display: str = ""
     fallback_version: str = ""
+    fallback_13x: str = ""
+    fallback_14x: str = ""
     version_status: str = "UNKNOWN"
     version_source: str = ""
     version_confidence: str = ""
@@ -1404,27 +1406,10 @@ def _get_release_catalog(timeout: int) -> Tuple[List[dict], List[str]]:
         return _release_catalog, _release_catalog_notes
 
 
-def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict], List[str]]:
-    """Rank nearby releases by date; an older build may reuse a newer GZIP file."""
-    build_datetime = datetime.fromtimestamp(stamp, timezone.utc)
-    build_date = build_datetime.date()
-    catalog, notes = _get_release_catalog(timeout)
-
-    possible = []
-    for release in catalog:
-        release_datetime = _parse_release_datetime(release.get("release_date", ""))
-        if not release_datetime:
-            continue
-        lead_days = (release_datetime.date() - build_date).days
-        possible.append({
-            **release,
-            "release_datetime": release_datetime,
-            "lead_days": lead_days,
-        })
-
+def _rank_release_family(possible: List[dict], family: str) -> List[dict]:
+    """Return dated neighbors and scores within one possible firmware family."""
     if not possible:
-        return [], notes
-
+        return []
     possible.sort(key=lambda item: (
         item["release_datetime"],
         0 if item.get("variant", "ADC") == "ADC" else 1,
@@ -1472,8 +1457,8 @@ def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict],
         )
         selected.append(("next", following))
 
-    # Relative proximity scores, not calibrated match probabilities. In
-    # particular, a GZIP file may be updated without a firmware upgrade.
+    # Scores are relative within this family, not the probability that the
+    # appliance uses 13.x instead of 14.x (or even the displayed build).
     distances = [abs(item["lead_days"]) for _, item in selected]
     closest_distance = min(distances)
     weights = [math.exp(-(distance - closest_distance) / 7.0)
@@ -1486,6 +1471,7 @@ def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict],
     candidates = []
     for (position, item), probability in zip(selected, probabilities):
         candidates.append({
+            "branch_family": family,
             "position": position,
             "full_version": item["full_version"],
             "variant": item.get("variant", "ADC"),
@@ -1494,22 +1480,54 @@ def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict],
             "probability": probability,
             "source": item.get("source", "unknown"),
         })
+    return candidates
+
+
+def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict], List[str]]:
+    """Rank 13.x and 14.x independently; resource dates cannot select a branch."""
+    build_date = datetime.fromtimestamp(stamp, timezone.utc).date()
+    catalog, notes = _get_release_catalog(timeout)
+    by_family = {"13.x": [], "14.x": []}
+    for release in catalog:
+        match = re.match(r"^(13|14)\.\d+-", release.get("full_version", ""))
+        if not match:
+            continue
+        release_datetime = _parse_release_datetime(release.get("release_date", ""))
+        if not release_datetime:
+            continue
+        family = f"{match.group(1)}.x"
+        by_family[family].append({
+            **release,
+            "release_datetime": release_datetime,
+            "lead_days": (release_datetime.date() - build_date).days,
+        })
+
+    candidates = []
+    for family, possible in by_family.items():
+        candidates.extend(_rank_release_family(possible, family))
     return candidates, notes
 
 
 def _format_release_candidates(candidates: List[dict], show_scores: bool = True) -> str:
-    formatted = []
-    for candidate in candidates:
-        variant = candidate.get("variant", "ADC")
-        variant_suffix = f"/{variant}" if variant != "ADC" else ""
-        score = (f"{candidate['probability']:.1f}% relative score, "
-                 if show_scores else "")
-        formatted.append(
-            f"{candidate['position']}={candidate['full_version']}{variant_suffix} "
-            f"({score}release {candidate['release_date']}, "
-            f"{candidate['lead_days']:+d}d)"
-        )
-    return "; ".join(formatted)
+    groups = []
+    for family in ("13.x", "14.x"):
+        formatted = []
+        for candidate in candidates:
+            if candidate.get("branch_family") != family:
+                continue
+            variant = candidate.get("variant", "ADC")
+            variant_suffix = f"/{variant}" if variant != "ADC" else ""
+            score = (f"{candidate['probability']:.1f}% relative score, "
+                     if show_scores else "")
+            formatted.append(
+                f"{candidate['position']}={candidate['full_version']}{variant_suffix} "
+                f"({score}release {candidate['release_date']}, "
+                f"{candidate['lead_days']:+d}d)"
+            )
+        groups.append(f"{family}: " + (
+            "; ".join(formatted) if formatted else "no dated release candidate available"
+        ))
+    return " | ".join(groups) if candidates else ""
 
 
 def _best_fallback_version(source: str) -> str:
@@ -1518,6 +1536,15 @@ def _best_fallback_version(source: str) -> str:
         r'\bbest=(\d{2}\.\d+-\d+\.\d+(?:/[A-Za-z0-9_-]+)?)(?=\s|;|$)', source
     )
     return match.group(1) if match else ""
+
+
+def _best_fallback_versions(source: str) -> Tuple[str, str]:
+    """Extract one display candidate per branch without choosing a branch."""
+    versions = []
+    for family in ("13.x", "14.x"):
+        match = re.search(rf"\b{re.escape(family)}:\s*([^|]+)", source)
+        versions.append(_best_fallback_version(match.group(1)) if match else "")
+    return versions[0], versions[1]
 
 
 def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
@@ -1774,7 +1801,7 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
                 diagnostic,
             )
         epa_diagnostics.append(
-            f"{epa_path} — valid PE but no NetScaler firmware version string found"
+            f"{epa_path} — MZ signature found; no NetScaler firmware version string found"
         )
 
     if epa_diagnostics:
@@ -2275,11 +2302,15 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
     result.version_confidence = ver_conf
     result.rdx_en_status = ver_diag
 
-    # Show the best date-only match, without promoting it to a confirmed
-    # firmware version for CVE, branch, EOL, or risk calculations.
+    # Display one date-only match per branch, without promoting either to a
+    # confirmed firmware version for CVE, branch, EOL, or risk calculations.
     if not ver_raw and ver_src:
-        result.fallback_version = _best_fallback_version(ver_src)
-        if result.fallback_version:
+        result.fallback_13x, result.fallback_14x = _best_fallback_versions(ver_src)
+        if result.fallback_13x or result.fallback_14x:
+            result.fallback_version = (
+                f"13.x: {result.fallback_13x or 'unavailable'} | "
+                f"14.x: {result.fallback_14x or 'unavailable'}"
+            )
             result.version_display = result.fallback_version
             result.version_status = "FALLBACK-LOW-CONFIDENCE"
 
@@ -2294,7 +2325,7 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
         )
         if epa_path:
             result.epa_available = True
-            evidence = "EPA PE verified" if deep_scan else "EPA HEAD or MZ prefix"
+            evidence = "EPA MZ prefix verified" if deep_scan else "EPA HEAD or MZ prefix"
             result.accessible_paths.append(f"{epa_path} [{evidence}]")
 
     if ver_raw:
@@ -2407,13 +2438,18 @@ def _print_fallback_indicator(source: str) -> None:
 
     date_match = re.search(r'\d{4}-\d{2}-\d{2}', source)
     date = f" {date_match.group(0)}" if date_match else ""
-    print(f"  Fallback indicator: {kind}{date} (date proximity only; firmware unverified)")
-    candidates = re.findall(r'(?:previous|best|next)=[^;]+', source)
-    for candidate in candidates:
-        print(textwrap.fill(candidate.strip(), width=105,
-                            initial_indent="    ", subsequent_indent="      "))
-    if not candidates:
-        print("    No dated release candidate available.")
+    print(f"  Fallback indicator: {kind}{date} (date proximity only; branch unknown)")
+    for family in ("13.x", "14.x"):
+        match = re.search(rf"\b{re.escape(family)}:\s*([^|]+)", source)
+        candidates = (re.findall(r'(?:previous|best|next)=[^;]+', match.group(1))
+                      if match else [])
+        if not candidates:
+            print(f"    {family}: no dated release candidate available")
+            continue
+        for candidate in candidates:
+            print(textwrap.fill(candidate.strip(), width=105,
+                                initial_indent=f"    {family}: ",
+                                subsequent_indent="      "))
 
 
 def print_result(r: ScanResult, verbose: bool = False):
@@ -2532,11 +2568,17 @@ def print_result(r: ScanResult, verbose: bool = False):
     print()
 
 
+def _count_version_fallbacks(results: list) -> int:
+    """Count date indicators even when no release candidate was available."""
+    return sum(1 for r in results if not r.version_raw and r.version_source)
+
+
 def print_summary(results: list):
     total = len(results)
     reachable = sum(1 for r in results if r.reachable)
     ns = sum(1 for r in results if r.is_netscaler)
     ver = sum(1 for r in results if r.version_raw)
+    fallback = _count_version_fallbacks(results)
     crit = sum(1 for r in results if r.risk_rating == "CRITICAL")
     high = sum(1 for r in results if r.risk_rating == "HIGH")
     med = sum(1 for r in results if r.risk_rating == "MEDIUM")
@@ -2553,6 +2595,7 @@ def print_summary(results: list):
     print(f"  Reachable          : {reachable}")
     print(f"  NetScaler Detected : {ns}")
     print(f"  Version Confirmed  : {ver}")
+    print(f"  Version Fallback Indicators : {fallback} (unconfirmed)")
     print(f"  EOL Software       : {eol_count}")
     print(f"\n  {COLORS['CRITICAL']}CRITICAL{R}  : {crit}")
     print(f"  {COLORS['HIGH']}HIGH{R}      : {high}")
@@ -2586,6 +2629,7 @@ def export_json(results: list, filepath: str):
             "summary": {
                 "total": len(results),
                 "netscaler": sum(1 for r in results if r.is_netscaler),
+                "version_fallback_indicators": _count_version_fallbacks(results),
                 "critical": sum(1 for r in results if r.risk_rating == "CRITICAL"),
                 "high": sum(1 for r in results if r.risk_rating == "HIGH"),
                 "total_cves": sum(r.total_vulns for r in results),
@@ -2598,7 +2642,8 @@ def export_json(results: list, filepath: str):
 def export_csv(results: list, filepath: str):
     fields = [
         "target", "ip", "port", "reachable", "is_netscaler", "version_display",
-        "fallback_version", "version_status", "branch", "eol", "version_source",
+        "fallback_version", "fallback_13x", "fallback_14x", "version_status",
+        "branch", "eol", "version_source",
         "version_confidence", "cve_assessed",
         "saml_idp_detected", "oauth_idp_detected", "gateway_detected", "aaa_detected", "mgmt_exposed",
         "tls_protocol", "tls_cipher", "tls_bits",
@@ -2629,6 +2674,7 @@ def export_markdown(results: list, filepath: str):
         f.write("| Metric | Count |\n|---|---|\n")
         f.write(f"| Targets Scanned | {len(results)} |\n")
         f.write(f"| NetScaler Detected | {sum(1 for r in results if r.is_netscaler)} |\n")
+        f.write(f"| Version Fallback Indicators (unconfirmed) | {_count_version_fallbacks(results)} |\n")
         f.write(f"| CRITICAL | {sum(1 for r in results if r.risk_rating == 'CRITICAL')} |\n")
         f.write(f"| HIGH | {sum(1 for r in results if r.risk_rating == 'HIGH')} |\n")
         f.write(f"| Total CVEs | {sum(r.total_vulns for r in results)} |\n")
