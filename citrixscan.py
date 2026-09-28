@@ -1488,7 +1488,7 @@ def _rank_release_family(possible: List[dict], family: str,
             "source": item.get("source", "unknown"),
         }
         if epa_date and item["lead_days"] == 2:
-            candidate["timing_marker"] = "POSSIBLE-PRE-RELEASE(+2d)"
+            candidate["timing_marker"] = "Pre Release OR previous Version"
         candidates.append(candidate)
     return candidates
 
@@ -1567,7 +1567,7 @@ def _best_fallback_timing(source: str, family: str) -> str:
     """Expose the +2-day EPA exception alongside the selected branch version."""
     match = re.search(rf"\b{re.escape(family)}:\s*([^|]+)", source)
     best = re.search(r'\bbest=[^;]+', match.group(1)) if match else None
-    marker = re.search(r'\[(POSSIBLE-PRE-RELEASE\(\+2d\))\]', best.group(0)) if best else None
+    marker = re.search(r'\[(Pre Release OR previous Version)\]', best.group(0)) if best else None
     return marker.group(1) if marker else ""
 
 
