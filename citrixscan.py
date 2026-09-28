@@ -970,6 +970,8 @@ class ScanResult:
     fallback_version: str = ""
     fallback_13x: str = ""
     fallback_14x: str = ""
+    fallback_13x_timing: str = ""
+    fallback_14x_timing: str = ""
     version_status: str = "UNKNOWN"
     version_source: str = ""
     version_confidence: str = ""
@@ -1406,8 +1408,13 @@ def _get_release_catalog(timeout: int) -> Tuple[List[dict], List[str]]:
         return _release_catalog, _release_catalog_notes
 
 
-def _rank_release_family(possible: List[dict], family: str) -> List[dict]:
+def _rank_release_family(possible: List[dict], family: str,
+                         epa_date: bool = False) -> List[dict]:
     """Return dated neighbors and scores within one possible firmware family."""
+    if epa_date:
+        # An EPA file date can precede a public release slightly, but a much
+        # later release cannot explain an already modified installer file.
+        possible = [item for item in possible if item["lead_days"] <= 2]
     if not possible:
         return []
     possible.sort(key=lambda item: (
@@ -1417,7 +1424,7 @@ def _rank_release_family(possible: List[dict], family: str) -> List[dict]:
     ))
     best = min(possible, key=lambda item: (
         abs(item["lead_days"]),
-        item["lead_days"] < 0,
+        item["lead_days"] > 0 if epa_date else item["lead_days"] < 0,
         0 if item.get("variant", "ADC") == "ADC" else 1,
         item["full_version"],
     ))
@@ -1470,7 +1477,7 @@ def _rank_release_family(possible: List[dict], family: str) -> List[dict]:
 
     candidates = []
     for (position, item), probability in zip(selected, probabilities):
-        candidates.append({
+        candidate = {
             "branch_family": family,
             "position": position,
             "full_version": item["full_version"],
@@ -1479,11 +1486,15 @@ def _rank_release_family(possible: List[dict], family: str) -> List[dict]:
             "lead_days": item["lead_days"],
             "probability": probability,
             "source": item.get("source", "unknown"),
-        })
+        }
+        if epa_date and item["lead_days"] == 2:
+            candidate["timing_marker"] = "POSSIBLE-PRE-RELEASE(+2d)"
+        candidates.append(candidate)
     return candidates
 
 
-def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict], List[str]]:
+def infer_release_candidates(stamp: int, timeout: int = 10, *,
+                             epa_date: bool = False) -> Tuple[List[dict], List[str]]:
     """Rank 13.x and 14.x independently; resource dates cannot select a branch."""
     build_date = datetime.fromtimestamp(stamp, timezone.utc).date()
     catalog, notes = _get_release_catalog(timeout)
@@ -1504,12 +1515,15 @@ def infer_release_candidates(stamp: int, timeout: int = 10) -> Tuple[List[dict],
 
     candidates = []
     for family, possible in by_family.items():
-        candidates.extend(_rank_release_family(possible, family))
+        candidates.extend(_rank_release_family(possible, family, epa_date=epa_date))
     return candidates, notes
 
 
-def _format_release_candidates(candidates: List[dict], show_scores: bool = True) -> str:
+def _format_release_candidates(candidates: List[dict], show_scores: bool = True,
+                               *, epa_date: bool = False) -> str:
     groups = []
+    missing = ("no eligible dated release (+2d cutoff)" if epa_date
+               else "no dated release candidate available")
     for family in ("13.x", "14.x"):
         formatted = []
         for candidate in candidates:
@@ -1519,13 +1533,15 @@ def _format_release_candidates(candidates: List[dict], show_scores: bool = True)
             variant_suffix = f"/{variant}" if variant != "ADC" else ""
             score = (f"{candidate['probability']:.1f}% relative score, "
                      if show_scores else "")
+            timing = (f" [{candidate['timing_marker']}]"
+                      if candidate.get("timing_marker") else "")
             formatted.append(
-                f"{candidate['position']}={candidate['full_version']}{variant_suffix} "
+                f"{candidate['position']}={candidate['full_version']}{variant_suffix}{timing} "
                 f"({score}release {candidate['release_date']}, "
                 f"{candidate['lead_days']:+d}d)"
             )
         groups.append(f"{family}: " + (
-            "; ".join(formatted) if formatted else "no dated release candidate available"
+            "; ".join(formatted) if formatted else missing
         ))
     return " | ".join(groups) if candidates else ""
 
@@ -1545,6 +1561,14 @@ def _best_fallback_versions(source: str) -> Tuple[str, str]:
         match = re.search(rf"\b{re.escape(family)}:\s*([^|]+)", source)
         versions.append(_best_fallback_version(match.group(1)) if match else "")
     return versions[0], versions[1]
+
+
+def _best_fallback_timing(source: str, family: str) -> str:
+    """Expose the +2-day EPA exception alongside the selected branch version."""
+    match = re.search(rf"\b{re.escape(family)}:\s*([^|]+)", source)
+    best = re.search(r'\bbest=[^;]+', match.group(1)) if match else None
+    marker = re.search(r'\[(POSSIBLE-PRE-RELEASE\(\+2d\))\]', best.group(0)) if best else None
+    return marker.group(1) if marker else ""
 
 
 def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
@@ -1702,15 +1726,16 @@ def extract_version(responses, extended_responses, paths_tried, ctx, host, port,
             continue
 
         stamp = int(dt.timestamp())
-        candidates, notes = infer_release_candidates(stamp, timeout)
+        candidates, notes = infer_release_candidates(stamp, timeout, epa_date=True)
         date_text = dt.astimezone(timezone.utc).date().isoformat()
         epa_source = (f"EPA file Last-Modified fallback indicator {epa_path} "
                       f"(file date {date_text}, via {method}; not a firmware build date)")
         if candidates:
             epa_source += ("; nearby releases by date only: "
-                           + _format_release_candidates(candidates, show_scores=False))
+                           + _format_release_candidates(candidates, show_scores=False,
+                                                        epa_date=True))
         else:
-            epa_source += "; no dated release candidates available"
+            epa_source += "; no eligible dated releases (+2d cutoff)"
         if not inferred_has_candidates:
             inferred_source = epa_source
             inferred_confidence = "LOW"
@@ -2307,9 +2332,14 @@ def scan_target(target: str, port: int = 443, timeout: int = 15,
     if not ver_raw and ver_src:
         result.fallback_13x, result.fallback_14x = _best_fallback_versions(ver_src)
         if result.fallback_13x or result.fallback_14x:
+            result.fallback_13x_timing = _best_fallback_timing(ver_src, "13.x")
+            result.fallback_14x_timing = _best_fallback_timing(ver_src, "14.x")
+            v13 = (result.fallback_13x or "unavailable") + (
+                f" [{result.fallback_13x_timing}]" if result.fallback_13x_timing else "")
+            v14 = (result.fallback_14x or "unavailable") + (
+                f" [{result.fallback_14x_timing}]" if result.fallback_14x_timing else "")
             result.fallback_version = (
-                f"13.x: {result.fallback_13x or 'unavailable'} | "
-                f"14.x: {result.fallback_14x or 'unavailable'}"
+                f"13.x: {v13} | 14.x: {v14}"
             )
             result.version_display = result.fallback_version
             result.version_status = "FALLBACK-LOW-CONFIDENCE"
@@ -2444,7 +2474,13 @@ def _print_fallback_indicator(source: str) -> None:
         candidates = (re.findall(r'(?:previous|best|next)=[^;]+', match.group(1))
                       if match else [])
         if not candidates:
-            print(f"    {family}: no dated release candidate available")
+            if match:
+                reason = match.group(1).strip()
+            elif kind.startswith("EPA file"):
+                reason = "no eligible dated release (+2d cutoff)"
+            else:
+                reason = "no dated release candidate available"
+            print(f"    {family}: {reason}")
             continue
         for candidate in candidates:
             print(textwrap.fill(candidate.strip(), width=105,
@@ -2642,7 +2678,8 @@ def export_json(results: list, filepath: str):
 def export_csv(results: list, filepath: str):
     fields = [
         "target", "ip", "port", "reachable", "is_netscaler", "version_display",
-        "fallback_version", "fallback_13x", "fallback_14x", "version_status",
+        "fallback_version", "fallback_13x", "fallback_14x",
+        "fallback_13x_timing", "fallback_14x_timing", "version_status",
         "branch", "eol", "version_source",
         "version_confidence", "cve_assessed",
         "saml_idp_detected", "oauth_idp_detected", "gateway_detected", "aaa_detected", "mgmt_exposed",
