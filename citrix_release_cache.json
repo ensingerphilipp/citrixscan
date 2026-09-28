@@ -527,8 +527,32 @@
       "release_date": "2026-09-03T06:00:11.000Z",
       "source": "release-api",
       "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-73.37",
+      "release_date": "2026-09-27T15:02:05.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "13.1-64.24",
+      "release_date": "2026-09-27T15:32:43.000Z",
+      "source": "release-api",
+      "variant": "ADC"
+    },
+    {
+      "full_version": "14.1-73.37",
+      "release_date": "2026-09-27T16:01:57.000Z",
+      "source": "release-api",
+      "variant": "FIPS"
+    },
+    {
+      "full_version": "13.1-37.279",
+      "release_date": "2026-09-27T16:43:28.000Z",
+      "source": "release-api",
+      "variant": "FIPS"
     }
   ],
   "source": "release-api + document-history + cumulative cache",
-  "updated_at": "2026-09-24T12:58:54.226355+00:00"
+  "updated_at": "2026-09-28T12:25:36.903943+00:00"
 }
