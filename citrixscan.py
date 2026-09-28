@@ -1239,6 +1239,21 @@ def _release_api_get(path: str, params: Optional[dict] = None, timeout: int = 10
         return json.loads(response.read().decode("utf-8"))
 
 
+def _release_api_error_note(prefix: str, error: Exception) -> str:
+    """Explain catalog TLS failures without weakening certificate verification."""
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        detail = getattr(reason, "verify_message", None) or str(reason)
+        host = urllib.parse.urlsplit(RELEASE_API_BASE).hostname
+        if "CA certificate key too weak" in detail:
+            action = "replace the weak CA certificate (including any HTTPS proxy CA)"
+        else:
+            action = "check the certificate chain and any HTTPS proxy"
+        return (f"{prefix}: TLS verification failed for release API {host} "
+                f"({detail}); {action}. Using cached/manual releases, which may be stale")
+    return f"{prefix}: {error}"
+
+
 def _load_release_file(path: str) -> List[dict]:
     """Load normalized releases from a cache or manual history JSON file."""
     try:
@@ -1309,7 +1324,7 @@ def _fetch_and_cache_releases(timeout: int) -> Tuple[List[dict], List[str]]:
             raise ValueError("invalid versions response")
     except (StopIteration, KeyError, AttributeError, TypeError, ValueError, OSError,
             urllib.error.URLError, json.JSONDecodeError) as exc:
-        notes.append(f"release API unavailable: {exc}")
+        notes.append(_release_api_error_note("release API unavailable", exc))
         return list(cumulative.values()), notes
 
     fetched = 0
@@ -1327,7 +1342,7 @@ def _fetch_and_cache_releases(timeout: int) -> Tuple[List[dict], List[str]]:
                 build_results.append((version, future.result()))
             except (KeyError, AttributeError, TypeError, ValueError, OSError,
                     urllib.error.URLError, json.JSONDecodeError) as exc:
-                notes.append(f"release API build query failed: {exc}")
+                notes.append(_release_api_error_note("release API build query failed", exc))
 
     for version, builds in build_results:
         if not isinstance(builds, list):
@@ -2836,7 +2851,10 @@ def main():
     releases, release_notes = _get_release_catalog(args.timeout)
     print(f"  Release catalog: {len(releases)} builds │ cache: {RELEASE_CACHE_FILE}")
     for note in release_notes:
-        print(f"[!] {note}", file=sys.stderr)
+        if "TLS verification failed for release API" in note:
+            print(f"{COLORS['CRITICAL']}[!] {note}{R}", file=sys.stderr)
+        else:
+            print(f"[!] {note}", file=sys.stderr)
     print(f"{'─'*80}")
 
     results = []
